@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import random
 import sys
 from collections import Counter, defaultdict
@@ -183,14 +184,47 @@ def class_table(rows: list[dict], splits: np.ndarray) -> dict[str, Counter]:
 
 # --------------------------------------------------------------------------------------
 
+def resolve_listed_path(list_file: Path, line: str) -> Path:
+    """Resolve a line from a YOLO list file exactly as Ultralytics does.
+
+    Ultralytics rewrites a leading ``./`` to the list file's own parent directory. Mirrored
+    here so `verify_listing` fails on a path Ultralytics would fail on, rather than on one
+    Python's own relative-path rules happen to dislike.
+    """
+    if line.startswith("./"):
+        return list_file.parent / line[2:]
+    return Path(line)
+
+
 def write_split_files(
     dataset: Path, rows: list[dict], splits: np.ndarray, prefix: str = ""
-) -> None:
-    out = dataset / "splits"
-    out.mkdir(exist_ok=True)
+) -> list[Path]:
+    """Write YOLO list files at the dataset root and return their paths.
+
+    Root, not a subdirectory: see the note in 01_build_dataset.write_data_yaml.
+    """
+    written = []
     for name in ("train", "val", "test"):
         paths = [f"./{r['image']}" for r, s in zip(rows, splits) if s == name]
-        (out / f"{prefix}{name}.txt").write_text("\n".join(paths) + "\n")
+        target = dataset / f"{prefix}{name}.txt"
+        target.write_text("\n".join(paths) + "\n")
+        written.append(target)
+    return written
+
+
+def verify_listing(list_file: Path) -> None:
+    """Confirm every listed image, and its label, exists where the trainer will look."""
+    lines = [x for x in list_file.read_text().splitlines() if x.strip()]
+    if not lines:
+        raise SplitError(f"{list_file.name} is empty")
+    for line in lines:
+        image = resolve_listed_path(list_file, line)
+        if not image.exists():
+            raise SplitError(f"{list_file.name}: {line} resolves to {image}, which does not exist")
+        label = Path(str(image).replace(f"{os.sep}images{os.sep}", f"{os.sep}labels{os.sep}"))
+        label = label.with_suffix(".txt")
+        if not label.exists():
+            raise SplitError(f"{list_file.name}: no label for {image.name} (expected {label})")
 
 
 def main() -> int:
@@ -253,7 +287,10 @@ def main() -> int:
     else:
         print("  OK: no cross-split near-duplicates")
 
-    write_split_files(args.dataset, rows, splits)
+    written = write_split_files(args.dataset, rows, splits)
+    for list_file in written:
+        verify_listing(list_file)
+    print(f"  OK: all listed images and labels resolve")
 
     # A random split, for contrast only. Reporting both makes the cost of the naive
     # approach visible -- it is typically 10-15 mAP points of self-deception.
@@ -266,7 +303,8 @@ def main() -> int:
         random_splits[i] = "val"
     for i in shuffled[n_val:n_val + n_test]:
         random_splits[i] = "test"
-    write_split_files(args.dataset, rows, random_splits, prefix="random_")
+    for list_file in write_split_files(args.dataset, rows, random_splits, prefix="random_"):
+        verify_listing(list_file)
 
     counts = Counter(splits.tolist())
     table = class_table(rows, splits)
@@ -293,8 +331,8 @@ def main() -> int:
         "assignment": assignment,
         "counts": {k: int(v) for k, v in counts.items()},
     }
-    (args.dataset / "splits" / "grouping.json").write_text(json.dumps(meta, indent=2))
-    print(f"\nwrote splits/{{train,val,test}}.txt, random_*.txt, grouping.json")
+    (args.dataset / "grouping.json").write_text(json.dumps(meta, indent=2))
+    print("\nwrote {train,val,test}.txt, random_*.txt, grouping.json")
     return 0
 
 

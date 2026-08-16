@@ -412,14 +412,19 @@ def write_sample(sample: Sample, out_dir: Path, index: int, stats: Stats) -> dic
 
 
 def write_data_yaml(out_dir: Path) -> None:
-    """Write data.yaml. Split paths point at files 02_split.py has yet to create."""
+    """Write data.yaml. Split lists are created later by 02_split.py.
+
+    The lists live at the dataset root, not in a subdirectory: Ultralytics resolves a
+    ``./`` path inside a list file against *that file's own parent*, so a list in
+    ``splits/`` would send it looking for ``splits/images/``.
+    """
     (out_dir / "data.yaml").write_text(
         yaml.safe_dump(
             {
                 "path": str(out_dir.resolve()).replace("\\", "/"),
-                "train": "splits/train.txt",
-                "val": "splits/val.txt",
-                "test": "splits/test.txt",
+                "train": "train.txt",
+                "val": "val.txt",
+                "test": "test.txt",
                 "nc": len(CANONICAL),
                 "names": CANONICAL,
             },
