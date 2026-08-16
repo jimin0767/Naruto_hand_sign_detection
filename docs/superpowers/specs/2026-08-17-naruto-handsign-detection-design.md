@@ -169,17 +169,48 @@ stage exists to prevent.
 
 ### 2.2 Stage 1 — Split (`02_split.py`)
 
-Subject-disjoint by source:
+**Splitting by source is not sufficient — revised during implementation.** Once `01_build`
+cropped otani's letterbox bars, otani was found to share a recording session with wilsons:
+**44% of otani images have a near-duplicate in wilsons, and 69% of wilsons in otani** —
+the same person, shirt, room, and desk, at a different crop. The overlap was invisible in
+the raw exports because the black bars dominated otani's perceptual hash. Visual inspection
+confirmed it is the same footage, not merely the same pose.
 
-| split | sources | imgs | share | per-class range |
+Sources are therefore linked by *content*, not by directory name: two sources are merged
+when they share frames within Hamming distance 5 of a 64-bit dHash, and each connected
+component is assigned to exactly one split. The threshold is deliberately loose —
+over-linking makes the held-out estimate conservative, under-linking silently inflates it.
+
+Discovered subject groups:
+
+| group | sources | images |
+|---|---|---|
+| 1 | cs, otani, wilsons | 2,681 |
+| 2 | vgu | 5,676 |
+| 3 | yylunxie | 1,200 |
+| 4 | chayawat | 1,197 |
+| 5 | minsub | 240 |
+| 6 | marcs | 208 |
+
+Resulting split:
+
+| split | sources | imgs | share | per-class |
 |---|---|---|---|---|
-| train | vgu, wilsons, chayawat, cs, marcs | 9,107 | 81.3% | 511–1,265 |
-| val | otani, minsub | 895 | 8.0% | 60–92 |
-| test | yylunxie | 1,200 | 10.7% | 100–100 |
+| train | vgu, wilsons, otani, cs, marcs | 8,565 | 76.5% | 476–1,237 |
+| val | chayawat, minsub | 1,437 | 12.8% | 119–120 |
+| test | yylunxie | 1,200 | 10.7% | 100 |
 
-No subject appears in more than one split. A random split is emitted alongside — **not for
-training**, but to quantify and present the gap between the two, which demonstrates why the
-disjoint split is the honest number.
+Val and test are near-perfectly class-balanced, so per-class metrics are directly
+comparable without reweighting. `marcs` is kept in train because a tiger-only source would
+distort per-class metrics in a held-out split.
+
+The script re-verifies the finished split independently of how groups were derived and
+**refuses to write a leaking split** unless `--allow-leakage` is passed. Naming any member
+of a group in `--val`/`--test` holds out the whole group, since its members are not
+separable.
+
+A random split is emitted alongside — **not for training**, but to quantify and present the
+gap between the two, which demonstrates why the disjoint split is the honest number.
 
 ### 2.3 Stage 2 — Train (`03_train.py`)
 
@@ -275,7 +306,13 @@ this is a live risk.
 4. **`marcs` is tiger-only**, contributing to tiger's over-representation (13.0% of boxes
    vs 6.2% for rat — 2.09× imbalance). Mild enough to leave uncorrected initially.
 5. **Test set is a single subject** (`yylunxie`). Subject-disjoint and therefore honest, but
-   narrow; a strong test score reflects generalization to *one* unseen person.
+   narrow; a strong test score reflects generalization to *one* unseen person. Val covers
+   two subjects (`chayawat`, `minsub`), so it is the more robust of the two for model
+   selection despite being the smaller sample per subject.
+6. **Subject grouping rests on a perceptual-hash threshold.** Two sources sharing a subject
+   in visually *dissimilar* footage — different room, different lighting — would not link
+   and would be split apart. The otani/wilsons case was caught only because the framing was
+   near-identical. Treat held-out scores as an upper bound on true generalization.
 
 ---
 
