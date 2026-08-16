@@ -1,0 +1,31 @@
+# Raw Roboflow exports (656 MB) and the dataset built from them.
+# Both are regenerable: 00_data from Roboflow Universe, 01_dataset via 01_build_dataset.py
+00_data/
+01_dataset/
+
+# Training artifacts
+runs/
+*.pt
+!yolo11m.pt.placeholder
+wandb/
+
+# Audit / analysis outputs
+docs/audit/
+*.jpg
+*.jpeg
+*.png
+!docs/**/*.png
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
