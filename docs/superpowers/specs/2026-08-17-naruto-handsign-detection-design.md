@@ -98,10 +98,30 @@ The shipped splits are therefore discarded and rebuilt (§2.2).
 ```
 16,326 boxes claimed
 12,102  after dropping the 4 bad sources
- 6,757  after exact-duplicate removal   ← working dataset
+11,202  after duplicate removal (256-bit dHash)   ← working dataset
+ 6,757  under the aggressive 64-bit variant (--dedup-bits 64)
 ~2,500  distinct visual moments (perceptual clustering)
    ~15  distinct people across 8 recording setups
 ```
+
+**Dedup sensitivity — revised during implementation.** The original plan deduplicated on a
+64-bit dHash, yielding 6,757 images. Measurement showed a 256-bit hash drops only 900
+images against 64-bit's 5,345; the 4,445-image gap is not duplicates but consecutive video
+frames that collide at 8×8 resolution while genuinely differing at 16×16.
+
+The justification for aggressive dedup also weakened once the split became source-disjoint:
+duplicates *within* a source can no longer leak across splits, because the whole source
+lands on one side. What remains is source over-weighting, which is better addressed with
+sampling weights — tunable and reversible — than by permanently deleting 44% of the data.
+
+Revised policy, implemented in `01_build_dataset.py`:
+- **Cross-source** duplicates are removed unconditionally on the 256-bit hash. `cs` and
+  `wilsons` share 56 frames; were they ever split apart, those frames would leak.
+- **Within-source** duplicates are removed on a configurable hash, default 256-bit.
+  `--dedup-bits 64` reproduces the original 6,757-image dataset.
+
+A safety check confirmed dedup does not destroy signal: of 1,620 collision groups under the
+64-bit hash, only 3 mix classes (1 under 256-bit).
 
 **The binding constraint is background diversity (8 setups), not image count.** This drives
 the split strategy (§2.2), the augmentation choices (§2.3), and the model sizing (§3).
@@ -126,12 +146,22 @@ Alias table maps every observed spelling to canonical: romaji (`tori`→bird, `i
 
 Steps:
 1. Read the 8 keeper sources; remap class indices through the alias table.
-2. Drop exact-dHash duplicates, keeping the highest-resolution copy.
+2. Drop duplicates per §1.6, keeping the highest-resolution copy.
 3. Strip `otani`'s letterbox bars and re-normalize its box coordinates.
-4. Clip `marcs`' 43 out-of-bounds boxes to frame.
-5. Write a single YOLO-format tree plus `data.yaml`.
-6. Emit `manifest.csv`: one row per output image with source, original path, dHash, split,
-   and class — so provenance of any image is answerable later.
+4. Clip out-of-bounds boxes to frame.
+5. Write a flat image/label pool plus `data.yaml`.
+6. Emit `manifest.csv`: one row per output image with source, original path, hash,
+   dimensions, and classes — so provenance of any image is answerable later.
+
+Splitting is deliberately *not* done here. Stage 0 answers "what data exists"; stage 1
+answers "how is it partitioned". Keeping them apart means the split can be changed without
+rebuilding 11,202 images.
+
+**Verification performed.** The remap was confirmed from two independent directions:
+chayawat's original `class_N` filenames form a clean 1:1 bijection with the canonical
+classes, and chayawat (romaji ordering) agrees with kasidit (English ordering) on all 500
+images the two share. Letterbox cropping and box renormalization were confirmed visually
+across a sample of otani outputs.
 
 **Fail loudly.** If an unrecognized class name appears, abort rather than silently
 assigning a default. A silent miscategorization here is the exact failure mode this whole
@@ -141,11 +171,11 @@ stage exists to prevent.
 
 Subject-disjoint by source:
 
-| split | sources | imgs | per-class range |
-|---|---|---|---|
-| train | vgu, wilsons, chayawat, cs, marcs | 4,752 | 263–737 |
-| val | otani, minsub | 843 | 58–88 |
-| test | yylunxie | 1,162 | 94–100 |
+| split | sources | imgs | share | per-class range |
+|---|---|---|---|---|
+| train | vgu, wilsons, chayawat, cs, marcs | 9,107 | 81.3% | 511–1,265 |
+| val | otani, minsub | 895 | 8.0% | 60–92 |
+| test | yylunxie | 1,200 | 10.7% | 100–100 |
 
 No subject appears in more than one split. A random split is emitted alongside — **not for
 training**, but to quantify and present the gap between the two, which demonstrates why the
@@ -242,8 +272,8 @@ this is a live risk.
    now; if the confusion matrix shows it dominating, cap its contribution.
 3. **`cs` is a close-up domain** (49% of boxes >50% of frame) that does not match webcam
    framing. Retained as hard-case variety, flagged as a candidate for removal.
-4. **`marcs` is tiger-only**, contributing to tiger's over-representation (13.7% of boxes
-   vs 6.2% for bird — 2.2× imbalance). Mild enough to leave uncorrected initially.
+4. **`marcs` is tiger-only**, contributing to tiger's over-representation (13.0% of boxes
+   vs 6.2% for rat — 2.09× imbalance). Mild enough to leave uncorrected initially.
 5. **Test set is a single subject** (`yylunxie`). Subject-disjoint and therefore honest, but
    narrow; a strong test score reflects generalization to *one* unseen person.
 
