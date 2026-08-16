@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 import shutil
 import sys
 from pathlib import Path
@@ -52,6 +53,26 @@ AUGMENTATION = {
     "mixup": 0.0,           # blends two signs into one frame; meaningless here
     "erasing": 0.4,
 }
+
+
+def resolve_cache_mode(requested: str, workers: int, start_method: str) -> tuple[str, str]:
+    """Pick a safe image-cache mode, returning ``(mode, explanation)``.
+
+    ``cache='ram'`` is only safe where workers are *forked*. Under ``spawn`` (Windows, and
+    macOS by default) the dataset object is pickled into every worker, so an N-GB RAM cache
+    becomes N GB *per worker*. With 8 workers and a 9.4 GB cache that is ~75 GB of demand:
+    in practice the machine swaps until the workers die with MemoryError, leaving the parent
+    alive and the GPU idle at 0%.
+
+    Disk caching sidesteps it -- workers read shared .npy files instead of carrying copies.
+    """
+    if requested != "ram" or workers == 0 or start_method == "fork":
+        return requested, ""
+    return "disk", (
+        f"cache='ram' is unsafe with workers={workers} under the '{start_method}' start "
+        f"method: the cache is pickled into each worker rather than shared. "
+        f"Falling back to cache='disk'. Use --workers 0 to force RAM caching."
+    )
 
 
 def build_split_yaml(dataset: Path, split: str, out: Path) -> Path:
@@ -133,9 +154,10 @@ def main() -> int:
     parser.add_argument("--patience", type=int, default=30)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument(
-        "--cache", choices=("ram", "disk", "none"), default="ram",
-        help="cache decoded images; the dataset is only ~440 MB of JPEG but decoding "
-             "dominates epoch time, and the decoded set fits comfortably in RAM",
+        "--cache", choices=("ram", "disk", "none"), default="disk",
+        help="cache decoded images; decoding dominates epoch time (248s vs ~90s). "
+             "Defaults to disk because 'ram' is unsafe with spawned workers -- see "
+             "resolve_cache_mode()",
     )
     parser.add_argument("--device", default="0")
     parser.add_argument("--seed", type=int, default=0)
@@ -162,9 +184,16 @@ def main() -> int:
     if args.no_fliplr:
         augmentation["fliplr"] = 0.0
 
+    cache_mode, cache_note = resolve_cache_mode(
+        args.cache, args.workers, multiprocessing.get_start_method()
+    )
+    if cache_note:
+        print(f"NOTE: {cache_note}")
+
     print(f"model {args.model}   split {args.split}   imgsz {args.imgsz}   "
           f"batch {args.batch}   epochs {args.epochs}")
-    print(f"fliplr {augmentation['fliplr']}   run -> {project / run_name}")
+    print(f"fliplr {augmentation['fliplr']}   cache {cache_mode}   "
+          f"workers {args.workers}   run -> {project / run_name}")
 
     model = YOLO(args.model)
     model.train(
@@ -181,7 +210,7 @@ def main() -> int:
         name=run_name,
         exist_ok=True,
         close_mosaic=min(15, max(1, args.epochs // 6)),
-        cache=False if args.cache == "none" else args.cache,
+        cache=False if cache_mode == "none" else cache_mode,
         amp=True,
         plots=True,
         **augmentation,

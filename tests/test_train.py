@@ -125,6 +125,47 @@ class TestSummarize:
         assert row["AP50"] == 0.1235
 
 
+class TestResolveCacheMode:
+    """Regression tests for the OOM that stalled a real run.
+
+    cache='ram' with spawned workers pickles the whole cache into every worker; on an
+    8-worker run that turned a 9.4 GB cache into ~75 GB of demand, killed the workers with
+    MemoryError, and left the parent alive with the GPU idle at 0%.
+    """
+
+    def test_ram_downgrades_to_disk_under_spawn(self):
+        mode, note = train.resolve_cache_mode("ram", 8, "spawn")
+        assert mode == "disk" and "unsafe" in note
+
+    def test_ram_allowed_under_fork(self):
+        """Forked workers share the cache copy-on-write, so RAM caching is fine."""
+        assert train.resolve_cache_mode("ram", 8, "fork") == ("ram", "")
+
+    def test_ram_allowed_with_zero_workers(self):
+        """No worker processes means nothing gets pickled."""
+        assert train.resolve_cache_mode("ram", 0, "spawn") == ("ram", "")
+
+    @pytest.mark.parametrize("requested", ["disk", "none"])
+    def test_other_modes_pass_through(self, requested):
+        assert train.resolve_cache_mode(requested, 8, "spawn") == (requested, "")
+
+    def test_downgrade_note_names_the_escape_hatch(self):
+        _, note = train.resolve_cache_mode("ram", 8, "spawn")
+        assert "--workers 0" in note
+
+    def test_forkserver_treated_as_unsafe(self):
+        """forkserver also pickles the dataset; only plain fork shares memory."""
+        assert train.resolve_cache_mode("ram", 8, "forkserver")[0] == "disk"
+
+    def test_default_is_safe_on_this_platform(self):
+        import multiprocessing
+        parser_default = "disk"
+        mode, _ = train.resolve_cache_mode(
+            parser_default, 8, multiprocessing.get_start_method()
+        )
+        assert mode == "disk"
+
+
 class TestAugmentationPolicy:
     def test_no_vertical_flip(self):
         """jannat was dropped for exactly this; do not reintroduce it."""
