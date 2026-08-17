@@ -192,7 +192,7 @@ class TestSequenceTracker:
 
 class TestLoadJutsu:
     def test_loads_the_shipped_file(self):
-        entries = demo.load_jutsu(Path(__file__).resolve().parents[1] / "jutsu.yaml")
+        entries = demo.load_jutsu(Path(__file__).resolve().parents[1] / "jutsu.csv")
         assert entries
         for j in entries:
             assert set(j.signs) <= set(demo.CANONICAL)

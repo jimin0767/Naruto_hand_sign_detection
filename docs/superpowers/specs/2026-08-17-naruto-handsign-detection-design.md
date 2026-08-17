@@ -257,7 +257,7 @@ at 0.25 versus 85.2% at 0.5, because the higher threshold makes 12% of frames de
 nothing at all. Raising it produces a cleaner-looking per-box demo that actually drops
 more signs.
 
-**Jutsu are data** (`jutsu.yaml`), not code. `load_jutsu` validates every sign against the
+**Jutsu are data** (`jutsu.csv`), not code. `load_jutsu` validates every sign against the
 canonical 12 and raises on anything else, so a sequence containing Gassho fails loudly at
 startup rather than silently never firing. The shipped sequences are a starting point and
 carry an explicit warning: adaptations disagree, and they should be verified before being
@@ -403,7 +403,7 @@ this is a live risk.
 02_split.py           content-derived subject-disjoint splits   [done]
 03_train.py           YOLO11m training + held-out reporting     [done]
 04_demo.py            webcam demo, smoothing, jutsu matching    [done]
-jutsu.yaml            editable jutsu sequences
+jutsu.csv             19 jutsu sequences, editable
 tests/                155 tests
 docs/                 this spec, confusion matrix, demo clip
 ```

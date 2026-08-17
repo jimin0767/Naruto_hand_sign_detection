@@ -6,7 +6,7 @@ Minimal integration:
 
     detector = HandSignDetector("best.pt")
     smoother = SignSmoother()                       # 25-frame window, 18 votes
-    tracker  = SequenceTracker(load_jutsu("jutsu.yaml"))
+    tracker  = SequenceTracker(load_jutsu("jutsu.csv"))
 
     detection = detector.detect(frame)              # BGR numpy array
     voting = detection.name if detection and detection.confidence >= 0.60 else None
@@ -26,11 +26,12 @@ from .smoothing import (
     Jutsu,
     SequenceTracker,
     SignSmoother,
+    find_unreachable,
     load_jutsu,
 )
 
 __all__ = [
     "CANONICAL", "CANONICAL_INDEX", "ROMAJI",
     "HandSignDetector", "Detection", "DEFAULT_CONF", "DEFAULT_ACCEPT_CONF",
-    "SignSmoother", "SequenceTracker", "Jutsu", "load_jutsu", "HandSignError",
+    "SignSmoother", "SequenceTracker", "Jutsu", "load_jutsu", "find_unreachable", "HandSignError",
 ]

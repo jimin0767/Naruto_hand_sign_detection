@@ -146,31 +146,94 @@ class SequenceTracker:
         return sorted(out, key=lambda pair: -pair[1])
 
 
-def load_jutsu(path: str | Path) -> list[Jutsu]:
-    """Read and validate a jutsu YAML file, rejecting signs the model cannot produce."""
-    import yaml
+def find_unreachable(jutsu: list[Jutsu]) -> list[tuple[str, str, int]]:
+    """Find jutsu that can never fire because a shorter one triggers partway through.
 
+    `SequenceTracker` matches after every sign and **clears the buffer** on a match. So if
+    a shorter jutsu completes midway through a longer one, it fires, wipes the buffer, and
+    the longer jutsu becomes permanently uncastable.
+
+    Note this is a *prefix-position* problem, not a suffix one. A shorter jutsu that is
+    merely the tail of a longer one is harmless, because candidates are tried longest
+    first and the longer match wins.
+
+    Returns ``(unreachable_name, blocking_name, sign_index)``.
+    """
+    blocked = []
+    for outer in jutsu:
+        for inner in jutsu:
+            if inner is outer or len(inner.signs) >= len(outer.signs):
+                continue
+            n = len(inner.signs)
+            for k in range(n, len(outer.signs)):
+                if outer.signs[k - n:k] == inner.signs:
+                    blocked.append((outer.name, inner.name, k))
+                    break
+            else:
+                continue
+            break
+    return blocked
+
+
+def _validate(name: str, signs: list[str]) -> list[str]:
+    if not signs:
+        raise HandSignError(f"jutsu {name!r} has no signs")
+    unknown = sorted(set(signs) - set(CANONICAL))
+    if unknown:
+        # Gassho, Mizunoe and the Clone Seal land here: real seals the source material
+        # uses but this model was never trained on. Failing loudly beats a jutsu that can
+        # silently never fire.
+        raise HandSignError(
+            f"jutsu {name!r} uses sign(s) {unknown} that this model cannot detect. "
+            f"Valid signs: {list(CANONICAL)}"
+        )
+    return signs
+
+
+def load_jutsu(path: str | Path, warn: bool = True) -> list[Jutsu]:
+    """Read and validate a jutsu table. Accepts .csv (preferred) or .yaml.
+
+    CSV layout, matching the reference project's `setting/jutsu.csv` but in English:
+
+        element,jutsu,sign1,sign2,...
+        Fire Style,Fireball Jutsu,snake,ram,monkey,boar,horse,tiger,
+
+    Trailing empty sign columns are ignored, so every row can be the same width.
+    """
     path = Path(path)
     if not path.exists():
         raise HandSignError(f"{path} not found")
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    entries = raw.get("jutsu") or []
-    if not entries:
+
+    out: list[Jutsu] = []
+    if path.suffix.lower() == ".csv":
+        import csv
+
+        rows = list(csv.reader(path.read_text(encoding="utf-8-sig").splitlines()))
+        rows = [r for r in rows if any(cell.strip() for cell in r)]
+        if rows and rows[0][:2] == ["element", "jutsu"]:
+            rows = rows[1:]                      # header is optional
+        for row in rows:
+            if len(row) < 3:
+                raise HandSignError(f"{path}: row {row!r} has no signs")
+            element, name = row[0].strip(), row[1].strip()
+            signs = [c.strip().lower() for c in row[2:] if c.strip()]
+            out.append(Jutsu(name, element, _validate(name, signs)))
+    else:
+        import yaml
+
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for entry in raw.get("jutsu") or []:
+            name = str(entry.get("name", "?"))
+            signs = [str(s).strip().lower() for s in entry.get("signs", [])]
+            out.append(Jutsu(name, str(entry.get("english", "")), _validate(name, signs)))
+
+    if not out:
         raise HandSignError(f"{path} defines no jutsu")
 
-    out = []
-    for entry in entries:
-        signs = [str(s).strip().lower() for s in entry.get("signs", [])]
-        if not signs:
-            raise HandSignError(f"jutsu {entry.get('name')!r} has no signs")
-        unknown = sorted(set(signs) - set(CANONICAL))
-        if unknown:
-            # Gassho and Mizunoe land here: real signs the reference project detects but
-            # this model was never trained on. Failing loudly beats a jutsu that can
-            # silently never fire.
-            raise HandSignError(
-                f"jutsu {entry.get('name')!r} uses sign(s) {unknown} that this model "
-                f"cannot detect. Valid signs: {list(CANONICAL)}"
-            )
-        out.append(Jutsu(str(entry.get("name", "?")), str(entry.get("english", "")), signs))
+    if warn:
+        for outer, inner, k in find_unreachable(out):
+            # A warning rather than an error: the rest of the table still works, and
+            # aborting mid-demo over one shadowed entry would be worse than the bug.
+            print(f"  WARNING: {outer!r} can never fire -- {inner!r} completes at "
+                  f"sign {k} and clears the buffer")
     return out

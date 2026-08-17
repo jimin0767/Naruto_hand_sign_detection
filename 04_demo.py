@@ -132,7 +132,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--weights", type=Path,
                         default=Path("runs/handsign/yolo11m_disjoint/weights/best.pt"))
-    parser.add_argument("--jutsu", type=Path, default=Path("jutsu.yaml"))
+    parser.add_argument("--jutsu", type=Path, default=Path("jutsu.csv"))
     parser.add_argument("--source", default="0", help="webcam index or video path")
     parser.add_argument("--conf", type=float, default=DEFAULT_CONF)
     parser.add_argument("--imgsz", type=int, default=640)

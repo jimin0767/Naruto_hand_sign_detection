@@ -96,3 +96,108 @@ class TestSmootherDefaults:
     def test_default_window_is_sized_for_high_frame_rates(self):
         """9 frames is 0.115s at the ~78 FPS this runs at -- too short to debounce."""
         assert handsign.SignSmoother().window.maxlen >= 20
+
+
+class TestJutsuCsv:
+    """The shipped jutsu table, and the CSV loader that reads it."""
+
+    @staticmethod
+    def table():
+        from pathlib import Path
+        return handsign.load_jutsu(Path(__file__).resolve().parents[1] / "jutsu.csv")
+
+    def test_loads(self):
+        assert len(self.table()) >= 15
+
+    def test_every_sign_is_detectable(self):
+        for j in self.table():
+            assert set(j.signs) <= set(CANONICAL), f"{j.name} uses an undetectable sign"
+
+    def test_no_jutsu_is_unreachable(self):
+        """A shorter jutsu completing mid-sequence would clear the buffer and block it."""
+        assert handsign.find_unreachable(self.table()) == []
+
+    def test_no_duplicate_sequences(self):
+        seqs = [tuple(j.signs) for j in self.table()]
+        assert len(seqs) == len(set(seqs))
+
+    def test_sequences_are_long_enough_to_be_deliberate(self):
+        """One- and two-sign jutsu fire by accident during other sequences."""
+        for j in self.table():
+            assert len(j.signs) >= 3, f"{j.name} is only {len(j.signs)} signs"
+
+    def test_sequences_are_short_enough_to_demo(self):
+        for j in self.table():
+            assert len(j.signs) <= 7, f"{j.name} is {len(j.signs)} signs"
+
+    def test_names_are_unique(self):
+        names = [j.name for j in self.table()]
+        assert len(names) == len(set(names))
+
+
+class TestFindUnreachable:
+    def test_detects_a_blocking_prefix(self):
+        """[a,b] completes at index 2 of [x,a,b,c], clearing the buffer before it ends."""
+        blocked = handsign.find_unreachable([
+            handsign.Jutsu("long", "", ["x", "a", "b", "c"]),
+            handsign.Jutsu("short", "", ["a", "b"]),
+        ])
+        assert blocked == [("long", "short", 3)]
+
+    def test_suffix_overlap_is_not_blocking(self):
+        """Tried longest-first, so a shorter tail does not shadow the longer jutsu."""
+        assert handsign.find_unreachable([
+            handsign.Jutsu("long", "", ["x", "a", "b"]),
+            handsign.Jutsu("short", "", ["a", "b"]),
+        ]) == []
+
+    def test_disjoint_jutsu_are_fine(self):
+        assert handsign.find_unreachable([
+            handsign.Jutsu("a", "", ["rat", "ox"]),
+            handsign.Jutsu("b", "", ["dog", "bird", "ram"]),
+        ]) == []
+
+    def test_equal_length_never_blocks(self):
+        assert handsign.find_unreachable([
+            handsign.Jutsu("a", "", ["rat", "ox"]),
+            handsign.Jutsu("b", "", ["rat", "ox"]),
+        ]) == []
+
+
+class TestCsvLoader:
+    def test_header_row_is_optional(self, tmp_path):
+        a = tmp_path / "a.csv"; a.write_text("Fire Style,X,snake,ram,tiger\n")
+        b = tmp_path / "b.csv"; b.write_text("element,jutsu,sign1,sign2,sign3\nFire Style,X,snake,ram,tiger\n")
+        assert [j.signs for j in handsign.load_jutsu(a)] == [j.signs for j in handsign.load_jutsu(b)]
+
+    def test_trailing_empty_columns_ignored(self, tmp_path):
+        p = tmp_path / "j.csv"; p.write_text("Fire Style,X,snake,ram,tiger,,,,\n")
+        assert handsign.load_jutsu(p)[0].signs == ["snake", "ram", "tiger"]
+
+    def test_element_is_kept(self, tmp_path):
+        p = tmp_path / "j.csv"; p.write_text("Water Style,X,dragon,tiger,hare\n")
+        assert handsign.load_jutsu(p)[0].english == "Water Style"
+
+    def test_case_and_space_normalised(self, tmp_path):
+        p = tmp_path / "j.csv"; p.write_text("Fire Style,X, SNAKE , Ram ,tiger\n")
+        assert handsign.load_jutsu(p)[0].signs == ["snake", "ram", "tiger"]
+
+    def test_blank_rows_skipped(self, tmp_path):
+        p = tmp_path / "j.csv"; p.write_text("Fire Style,X,snake,ram,tiger\n\n,,,,\n")
+        assert len(handsign.load_jutsu(p)) == 1
+
+    def test_undetectable_sign_rejected(self, tmp_path):
+        p = tmp_path / "j.csv"; p.write_text("Fire Style,X,snake,gassho,tiger\n")
+        with pytest.raises(handsign.HandSignError, match="gassho"):
+            handsign.load_jutsu(p)
+
+    def test_row_without_signs_rejected(self, tmp_path):
+        p = tmp_path / "j.csv"; p.write_text("Fire Style,X\n")
+        with pytest.raises(handsign.HandSignError, match="no signs"):
+            handsign.load_jutsu(p)
+
+    def test_utf8_bom_tolerated(self, tmp_path):
+        """Excel writes a BOM, and users will edit this file in Excel."""
+        p = tmp_path / "j.csv"
+        p.write_bytes(b"\xef\xbb\xbfelement,jutsu,sign1,sign2,sign3\nFire Style,X,snake,ram,tiger\n")
+        assert handsign.load_jutsu(p)[0].signs == ["snake", "ram", "tiger"]

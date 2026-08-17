@@ -40,7 +40,7 @@ from handsign import HandSignDetector, SignSmoother, SequenceTracker, load_jutsu
 
 detector = HandSignDetector("best.pt")
 smoother = SignSmoother()                       # 25-frame window, 18 votes
-tracker  = SequenceTracker(load_jutsu("jutsu.yaml"))
+tracker  = SequenceTracker(load_jutsu("jutsu.csv"))
 
 detection = detector.detect(frame)              # BGR numpy array
 voting = detection.name if detection and detection.confidence >= 0.60 else None
@@ -64,7 +64,26 @@ This order is load-bearing. It is defined once in `handsign/classes.py` and impo
 everywhere; see [INTEGRATION.md §1](INTEGRATION.md) for why.
 
 The reference project also detects **Gassho** (hand clap) and **Mizunoe** — no public
-dataset covers them, so jutsu requiring those signs cannot be triggered here.
+dataset covers them, so jutsu requiring those signs cannot be triggered here. The same
+applies to the **Clone Seal** (crossed fingers), which is not one of the twelve: Shadow
+Clone and Water Shark Bullet are therefore not representable.
+
+## Jutsu
+
+`jutsu.csv` holds 19 sequences, in the reference project's column layout but in English:
+
+```
+element,jutsu,sign1,sign2,...
+Fire Style,Fireball Jutsu,snake,ram,monkey,boar,horse,tiger
+```
+
+Sequences come from [Narutopedia](https://naruto.fandom.com) infoboxes. Entries are
+restricted to 3–7 signs: one- and two-sign jutsu fire by accident during other sequences,
+and the longest canonical jutsu (Water Dragon, 44 signs) is impractical to perform.
+
+`load_jutsu` rejects any sign the model cannot detect, and warns if a jutsu is
+**unreachable** — a shorter jutsu completing partway through a longer one clears the
+buffer and blocks it. Edit freely; the loader checks your work.
 
 ## Results
 
@@ -127,8 +146,10 @@ Full analysis: [`docs/superpowers/specs/`](docs/superpowers/specs/).
   commit threshold and debouncing; properly fixed by retraining with background images.
 - **12 classes, not 14** — no Gassho or Mizunoe.
 - **~15 people, 8 recording setups.** Narrow coverage of lighting and skin tone.
-- **Jutsu sequences in `jutsu.yaml` are unverified.** Manga, anime, and databooks disagree.
-  Treat the file as a starting point you own.
+- **Jutsu sequences may differ from your preferred source.** `jutsu.csv` follows
+  [Narutopedia](https://naruto.fandom.com) infobox data, which disagrees with the
+  reference project on two entries (see below). Manga, anime, and databooks are not
+  consistent; treat the file as a starting point you own.
 
 ## Licence and attribution
 
