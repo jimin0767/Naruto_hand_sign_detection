@@ -234,12 +234,37 @@ confusion matrix shows a specific mirror pair collapsing, it comes back off.
 
 ### 2.4 Stage 3 — Demo (`04_demo.py`)
 
-Webcam capture → YOLO11m inference → temporal smoothing over a rolling window → sequence
-matching against a jutsu table, restricted to jutsu expressible with the 12 available signs.
+Webcam capture → YOLO11m inference → temporal smoothing → sequence matching against a
+jutsu table, restricted to jutsu expressible with the 12 available signs.
 
-Temporal smoothing matters more than raw per-frame accuracy for perceived demo quality: a
-model at 0.85 mAP that flickers between classes looks worse than the same model with a
-5-frame majority vote.
+Three separable pieces, none of which need a camera to test:
+
+| component | responsibility |
+|---|---|
+| `SignSmoother` | frame predictions → confirmed signs (debounce + hysteresis) |
+| `SequenceTracker` | confirmed signs → matched jutsu, with idle timeout |
+| `draw_overlay` | state → pixels |
+
+**Smoothing design.** One mechanism solves two problems. *Flicker*: `hare` misreads as
+`monkey` on individual frames (§4.1). *Repetition*: a sign held for one second is 30
+frames but must register once. Both fall out of tracking a "held" sign — a new sign is
+emitted only when the window agrees on something different from what is held, and the hold
+clears when the window agrees the hands are down, which is what permits the same sign
+twice in a row. Defaults: 9-frame window, 6 votes to confirm, 6 to clear.
+
+**Confidence threshold: 0.25, not 0.5.** Measured top-1 on the held-out subject is 92.1%
+at 0.25 versus 85.2% at 0.5, because the higher threshold makes 12% of frames detect
+nothing at all. Raising it produces a cleaner-looking per-box demo that actually drops
+more signs.
+
+**Jutsu are data** (`jutsu.yaml`), not code. `load_jutsu` validates every sign against the
+canonical 12 and raises on anything else, so a sequence containing Gassho fails loudly at
+startup rather than silently never firing. The shipped sequences are a starting point and
+carry an explicit warning: adaptations disagree, and they should be verified before being
+presented as canon.
+
+**Verified** end-to-end on a clip assembled from held-out `yylunxie` frames:
+`rat → ox → tiger` recognised and matched, at 78–82 FPS.
 
 ---
 
@@ -279,7 +304,60 @@ Rejected alternatives:
 
 ---
 
-## 4. Evaluation
+## 4. Results
+
+Trained 60 epochs, early-stopped at epoch 53 (best epoch 23, patience 30), ~3.5 h.
+
+| | val (chayawat+minsub) | test (yylunxie) |
+|---|---|---|
+| mAP@0.5 | 0.9634 | 0.9872 |
+| mAP@0.5:0.95 | 0.5428 | 0.6085 |
+| **top-1 @ conf 0.25** | **92.1%** | **98.1%** |
+| top-1 @ conf 0.50 | 85.2% (12% no detection) | 96.8% |
+
+**mAP overstates demo performance; top-1 is the number to quote.** Ultralytics' confusion
+matrix scores every predicted box, including low-confidence duplicates emitted alongside
+the correct one, which makes the diagonal look far worse than the model behaves. The demo
+commits to the single highest-confidence box per frame, so top-1 is the metric that
+matches deployment.
+
+**The val↔test gap collapsed with training** — 14.0 points at 2 epochs (0.833 vs 0.971),
+2.4 points at convergence. The early spread was an undertraining artifact, not fundamental
+subject difficulty, which materially weakens the case for cross-validation (§4.2).
+
+### 4.1 Error structure
+
+Val confusions at conf 0.25, worst first:
+
+| true → predicted | n | share of class |
+|---|---|---|
+| hare → monkey | 24 | 20% |
+| horse → bird | 14 | 12% |
+| rat → ram | 11 | 9% |
+| snake → tiger | 9 | 8% |
+
+`hare` is the weak class at 67% accuracy; every other class exceeds 83%.
+
+The confusions cluster on signs that share a gross shape — `hare`, `monkey`, and `dog` are
+all "one hand stacked horizontally over the other", differing only in finger configuration
+and which hand is on top. When motion blur erases the finger detail, handedness is the
+only remaining cue, and `fliplr=0.5` is precisely what destroys it. This makes the planned
+flip ablation (§2.3) empirically motivated rather than speculative, and it is the next
+experiment to run.
+
+### 4.2 Cross-validation
+
+Deferred, and downgraded from the original plan. Leave-one-group-out over all six groups
+is not viable: `marcs` is 208 single-class images, and `vgu` is 51% of the data, so those
+folds are not comparable to the others. If run, the defensible design is 3 folds over the
+three substantial groups — {cs,otani,wilsons}, yylunxie, chayawat — with `minsub` held
+constant as val and `vgu`/`marcs` always in train, giving train sizes within 15% of each
+other.
+
+With the val↔test spread now at 2.4 points, this is a presentational nicety rather than a
+correction to a misleading number.
+
+## 5. Evaluation methodology
 
 - **Primary:** mAP@0.5 on the subject-disjoint test set.
 - **Secondary:** 12×12 confusion matrix, to distinguish class confusion from localization failure.
@@ -292,7 +370,9 @@ this is a live risk.
 
 ---
 
-## 5. Known limitations
+## 6. Known limitations
+
+### 6.1 Missing signs
 
 1. **12 classes, not 14.** The reference project detects Mizunoe and Gassho (hand claps);
    no public source here covers them. Several jutsu sequences terminate in Gassho, so the
@@ -316,12 +396,21 @@ this is a live risk.
 
 ---
 
-## 6. Deliverables
+## 7. Deliverables
 
 ```
-01_build_dataset.py   merge + remap + dedup + manifest
-02_split.py           subject-disjoint split (+ random split for comparison)
-03_train.py           YOLO11m training
-04_demo.py            webcam demo with temporal smoothing + jutsu matching
-docs/                 this spec, audit outputs, contact sheets
+01_build_dataset.py   merge + remap + dedup + manifest          [done]
+02_split.py           content-derived subject-disjoint splits   [done]
+03_train.py           YOLO11m training + held-out reporting     [done]
+04_demo.py            webcam demo, smoothing, jutsu matching    [done]
+jutsu.yaml            editable jutsu sequences
+tests/                155 tests
+docs/                 this spec, confusion matrix, demo clip
 ```
+
+Remaining, in recommended order:
+1. `--no-fliplr` ablation (§4.1) -- targets the measured hare/monkey confusion.
+2. Final model trained on all 11,202 images. Every run so far withholds 10-24% of the
+   data; the demo model should see all of it, since the presenter is a 7th unseen subject.
+3. Optional 3-fold CV (§4.2).
+4. Record Gassho and Mizunoe (§6.1) to widen the jutsu list.
