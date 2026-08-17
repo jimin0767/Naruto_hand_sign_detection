@@ -35,7 +35,14 @@ from handsign import (
     SignSmoother,
     load_jutsu,
 )
-from handsign.effects import AnchorTracker, LightningEffect, effect_for
+from handsign.effects import (
+    AnchorTracker,
+    LightningEffect,
+    TransformEffect,
+    TransformSpec,
+    effect_for,
+    load_sprite,
+)
 from handsign.ui import Card, DemoUI, UIState
 
 DemoError = HandSignError
@@ -80,6 +87,14 @@ def main() -> int:
     parser.add_argument("--width", type=int, default=960, help="camera panel width")
     parser.add_argument("--effect-seconds", type=float, default=None,
                         help="override how long a jutsu effect lasts")
+    parser.add_argument("--transform-image", type=Path, default=Path("assets/sakura.png"),
+                        help="sprite for Transformation Jutsu; a flat background is keyed "
+                             "automatically if the file has no alpha channel")
+    parser.add_argument("--transform-scale", type=float, default=None,
+                        help="sprite height relative to the detected person box; raise if "
+                             "the sprite looks too small for you")
+    parser.add_argument("--person-model", default="yolo11n.pt",
+                        help="COCO model used to locate you during a sprite transform")
     parser.add_argument("--no-mirror", action="store_true")
     parser.add_argument("--record", type=Path, default=None)
     parser.add_argument("--headless", action="store_true",
@@ -120,6 +135,17 @@ def main() -> int:
     # Runs every frame, not just during an effect, so the anchor is already warm and
     # settled the instant a jutsu fires.
     anchor = AnchorTracker()
+    # A second tracker: sprite transforms need the whole person, not the hands.
+    person_anchor = AnchorTracker(snap_distance=260.0)
+    person_model = None
+
+    sprite = None
+    if args.transform_image.exists():
+        sprite = load_sprite(args.transform_image)
+        print(f"loaded transform sprite {args.transform_image} {sprite.shape[1]}x{sprite.shape[0]}")
+    else:
+        print(f"note: {args.transform_image} not found -- Transformation Jutsu will show "
+              f"the banner only")
     writer = None
     frame_times: deque[float] = deque(maxlen=30)
     print("running -- q or Esc to quit, r to reset the sequence")
@@ -151,7 +177,20 @@ def main() -> int:
                             matched.name, matched.english, now)
                         cards = []
                         spec = effect_for(matched.name)
-                        if spec:
+                        if isinstance(spec, TransformSpec):
+                            if sprite is None:
+                                spec = None          # no asset, no effect
+                            else:
+                                if args.effect_seconds:
+                                    spec = replace(spec, duration=args.effect_seconds)
+                                if args.transform_scale:
+                                    spec = replace(spec, scale=args.transform_scale)
+                                if person_model is None:
+                                    from ultralytics import YOLO
+                                    person_model = YOLO(args.person_model)
+                                person_anchor.reset()
+                                effect, effect_at = TransformEffect(spec, sprite), now
+                        elif spec:
                             if args.effect_seconds:
                                 spec = replace(spec, duration=args.effect_seconds)
                             effect, effect_at = LightningEffect(spec), now
@@ -190,10 +229,28 @@ def main() -> int:
             if effect is not None:
                 if now - effect_at > effect.spec.duration:
                     effect = None
-                elif tracked is not None:
-                    state.effect = effect
-                    state.effect_centre, state.effect_radius = tracked
-                    state.effect_age = now - effect_at
+                else:
+                    if isinstance(effect, TransformEffect):
+                        # Person detection only runs while a sprite transform is on
+                        # screen, so it costs nothing the rest of the time.
+                        pr = person_model.predict(frame, conf=0.35, classes=[0],
+                                                  verbose=False, device=args.device)[0]
+                        pbox = None
+                        if len(pr.boxes):
+                            best = int(pr.boxes.conf.argmax())
+                            pbox = tuple(float(v) * scale
+                                         for v in pr.boxes.xyxy[best].tolist())
+                        anchored = person_anchor.update(pbox, now)
+                        if anchored is not None:
+                            # Half the box HEIGHT: the sprite is scaled and top-aligned
+                            # against the person's vertical extent.
+                            anchored = (anchored[0], person_anchor.size[1] / 2)
+                    else:
+                        anchored = tracked
+                    if anchored is not None:
+                        state.effect = effect
+                        state.effect_centre, state.effect_radius = anchored
+                        state.effect_age = now - effect_at
             canvas = ui.render(frame, state, now)
 
             if args.record:
@@ -214,6 +271,7 @@ def main() -> int:
                     tracker.buffer.clear()
                     cards, jutsu_name, effect = [], None, None
                     anchor.reset()
+                    person_anchor.reset()
                     print("  -- reset")
     finally:
         cap.release()

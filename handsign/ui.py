@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 
 from .classes import CANONICAL, KANJI, ROMAJI
+from .effects import blit_rgba  # noqa: F401  re-exported for existing importers
 
 # Dark, high-contrast palette. Orange accent reads as Naruto without being garish, and
 # stays legible against the skin tones and room lighting that dominate a webcam frame.
@@ -83,19 +84,6 @@ def centre_text(img, text, cx, y, scale, colour, thickness=2):
     (w, _), _ = cv2.getTextSize(text, FONT, scale, thickness)
     cv2.putText(img, text, (int(cx - w / 2), y), FONT, scale, colour, thickness, cv2.LINE_AA)
     return w
-
-
-def blit_rgba(dst, tile, x, y, alpha=1.0):
-    """Alpha-composite an RGBA tile onto a BGR image, clipped to bounds."""
-    th, tw = tile.shape[:2]
-    H, W = dst.shape[:2]
-    x0, y0 = max(0, x), max(0, y)
-    x1, y1 = min(W, x + tw), min(H, y + th)
-    if x0 >= x1 or y0 >= y1:
-        return
-    patch = tile[y0 - y:y1 - y, x0 - x:x1 - x]
-    a = (patch[:, :, 3:4].astype(np.float32) / 255.0) * alpha
-    dst[y0:y1, x0:x1] = (patch[:, :, :3] * a + dst[y0:y1, x0:x1] * (1 - a)).astype(np.uint8)
 
 
 @dataclass

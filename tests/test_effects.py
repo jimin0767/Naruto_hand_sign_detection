@@ -6,6 +6,7 @@ buffers near frame edges, so the bounds cases matter more than the aesthetics.
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 import pytest
 
@@ -14,6 +15,10 @@ from handsign.effects import (
     EFFECTS,
     AnchorTracker,
     EffectSpec,
+    TransformEffect,
+    TransformSpec,
+    key_background,
+    load_sprite,
     LightningEffect,
     effect_for,
     jagged_path,
@@ -290,3 +295,169 @@ class TestDurationOverride:
 
     def test_default_is_the_longer_duration(self):
         assert CHIDORI.duration >= 5.0
+
+
+class TestKeyBackground:
+    def _checkerboard(self, w=80, h=120):
+        """Mimics a 'transparent' PNG flattened to RGB: two near-white values."""
+        bg = np.full((h, w, 3), 255, np.uint8)
+        bg[::8, ::8] = 254
+        return bg
+
+    def test_flat_background_is_fully_keyed(self):
+        alpha = key_background(self._checkerboard())
+        assert (alpha == 0).mean() > 0.95
+
+    def test_subject_is_kept(self):
+        img = self._checkerboard()
+        cv2.rectangle(img, (20, 30), (60, 90), (40, 20, 160), -1)
+        alpha = key_background(img)
+        assert alpha[60, 40] == 255
+        assert alpha[2, 2] == 0
+
+    def test_pale_subject_interior_survives(self):
+        """A white shape inside the subject must not be keyed out with the background."""
+        img = self._checkerboard()
+        cv2.rectangle(img, (20, 30), (60, 90), (40, 20, 160), -1)
+        cv2.rectangle(img, (32, 45), (48, 70), (255, 255, 255), -1)   # enclosed white
+        alpha = key_background(img)
+        assert alpha[55, 40] == 255, "enclosed white was keyed out"
+
+    def test_returns_uint8_mask_of_matching_shape(self):
+        img = self._checkerboard(40, 50)
+        alpha = key_background(img)
+        assert alpha.shape == (50, 40) and alpha.dtype == np.uint8
+
+
+class TestLoadSprite:
+    def _write(self, tmp_path, name="s.png"):
+        # Realistic sprite dimensions: the de-fringe erode+blur is a fixed pixel width,
+        # so on a 30px-wide test shape it eats a visible fraction of the interior while
+        # on a real 300px sprite it is negligible.
+        # A circle, not a rectangle: cropping a solid rectangle to its opaque bounds
+        # leaves no transparent pixels at all, which makes "background was removed"
+        # untestable.
+        img = np.full((600, 400, 3), 255, np.uint8)
+        cv2.circle(img, (200, 300), 150, (40, 20, 160), -1)
+        p = tmp_path / name
+        cv2.imwrite(str(p), img)
+        return p
+
+    def test_loads_rgb_and_keys_it(self, tmp_path):
+        sprite = load_sprite(self._write(tmp_path))
+        assert sprite.shape[2] == 4
+        assert (sprite[:, :, 3] == 0).any(), "background not keyed"
+        assert (sprite[:, :, 3] > 200).any(), "subject not kept"
+
+    def test_cropped_to_opaque_bounds(self, tmp_path):
+        """Placement aligns to the subject, not to whatever padding the file carried."""
+        sprite = load_sprite(self._write(tmp_path))
+        assert sprite.shape[0] < 600 and sprite.shape[1] < 400
+
+    def test_existing_alpha_is_respected(self, tmp_path):
+        rgba = np.zeros((600, 400, 4), np.uint8)
+        rgba[100:500, 50:350] = (10, 200, 10, 255)
+        p = tmp_path / "a.png"
+        cv2.imwrite(str(p), rgba)
+        sprite = load_sprite(p)
+        assert sprite.shape[2] == 4 and (sprite[:, :, 3] > 200).mean() > 0.9
+
+    def test_defringe_keeps_the_interior_fully_opaque(self, tmp_path):
+        """Edge softening must not translate into a semi-transparent subject."""
+        sprite = load_sprite(self._write(tmp_path))
+        assert sprite[:, :, 3].max() == 255
+        opaque = (sprite[:, :, 3] > 200).mean()
+        assert opaque > 0.7, f"interior went translucent ({opaque:.2f})"
+
+    def test_missing_file_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            load_sprite(tmp_path / "nope.png")
+
+    def test_fully_flat_image_raises(self, tmp_path):
+        p = tmp_path / "blank.png"
+        cv2.imwrite(str(p), np.full((40, 40, 3), 255, np.uint8))
+        with pytest.raises(ValueError, match="fully transparent"):
+            load_sprite(p)
+
+    def test_the_shipped_sprite_loads_if_present(self):
+        from pathlib import Path
+        path = Path(__file__).resolve().parents[1] / "assets" / "sakura.png"
+        if not path.exists():
+            pytest.skip("assets/sakura.png is gitignored; supply your own")
+        sprite = load_sprite(path)
+        assert sprite.shape[2] == 4
+        assert 0.2 < (sprite[:, :, 3] > 16).mean() < 0.95
+
+
+class TestTransformEffect:
+    @pytest.fixture
+    def sprite(self):
+        rgba = np.zeros((200, 100, 4), np.uint8)
+        rgba[:, :, :3] = (30, 80, 220)
+        rgba[:, :, 3] = 255
+        return rgba
+
+    @pytest.fixture
+    def fx(self, sprite):
+        return TransformEffect(TransformSpec(duration=4.0, smoke_s=0.5), sprite, seed=0)
+
+    def test_sprite_hidden_behind_the_initial_puff(self, fx):
+        assert fx.sprite_alpha(0.0) == 0.0
+        assert fx.sprite_alpha(0.1) == 0.0
+
+    def test_sprite_appears_after_the_puff_peaks(self, fx):
+        assert fx.sprite_alpha(0.5) == pytest.approx(1.0)
+
+    def test_sprite_fades_at_the_end(self, fx):
+        assert 0.0 < fx.sprite_alpha(3.8) < 1.0
+        assert fx.sprite_alpha(4.0) == pytest.approx(0.0)
+
+    def test_smoke_rises_and_clears(self, fx):
+        assert fx.smoke_alpha(0.0) == pytest.approx(0.0)
+        assert fx.smoke_alpha(0.25) > 0.8
+        assert fx.smoke_alpha(0.6) == 0.0
+
+    def test_draw_changes_the_frame(self, fx, frame):
+        before = frame.copy()
+        fx.draw(frame, (320.0, 180.0), 150.0, 1.0)
+        assert not np.array_equal(frame, before)
+
+    def test_nothing_drawn_when_expired(self, fx, frame):
+        before = frame.copy()
+        fx.draw(frame, (320.0, 180.0), 150.0, 99.0)
+        assert np.array_equal(frame, before)
+
+    def test_sprite_is_top_aligned(self, fx, frame):
+        """A torso-up person box ends at the chest; centring sinks her head into it."""
+        fx.draw(frame, (320.0, 200.0), 150.0, 1.0)
+        top_band = frame[55:70, 300:340]
+        assert top_band.std() > 0, "nothing drawn near the top of the person box"
+
+    def test_scale_controls_sprite_height(self, sprite, frame):
+        small = TransformEffect(TransformSpec(scale=0.5, smoke_s=0.01), sprite, seed=1)
+        big = TransformEffect(TransformSpec(scale=2.0, smoke_s=0.01), sprite, seed=1)
+        a, b = frame.copy(), frame.copy()
+        small.draw(a, (320.0, 180.0), 60.0, 1.0)
+        big.draw(b, (320.0, 180.0), 60.0, 1.0)
+        assert (b != 30).sum() > (a != 30).sum()
+
+    @pytest.mark.parametrize("centre", [(0.0, 0.0), (639.0, 359.0), (-100.0, 180.0)])
+    def test_offscreen_anchor_is_safe(self, fx, frame, centre):
+        fx.draw(frame, centre, 150.0, 1.0)
+
+    def test_tiny_radius_is_safe(self, fx, frame):
+        fx.draw(frame, (320.0, 180.0), 0.0, 1.0)
+
+
+class TestEffectRegistryTypes:
+    def test_transformation_is_registered_as_a_sprite_effect(self):
+        assert isinstance(effect_for("Transformation Jutsu"), TransformSpec)
+
+    def test_chidori_is_still_procedural(self):
+        assert isinstance(effect_for("Chidori"), EffectSpec)
+
+    def test_anchor_tracker_exposes_box_size(self):
+        """TransformEffect needs a real height; deriving one from `radius` is a units bug."""
+        t = AnchorTracker()
+        t.update((100.0, 50.0, 200.0, 350.0), 0.0)
+        assert t.size == pytest.approx((100.0, 300.0))

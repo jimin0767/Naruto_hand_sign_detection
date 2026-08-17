@@ -12,9 +12,23 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import cv2
 import numpy as np
+
+
+def blit_rgba(dst, tile, x, y, alpha=1.0):
+    """Alpha-composite an RGBA tile onto a BGR image, clipped to bounds."""
+    th, tw = tile.shape[:2]
+    H, W = dst.shape[:2]
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(W, x + tw), min(H, y + th)
+    if x0 >= x1 or y0 >= y1:
+        return
+    patch = tile[y0 - y:y1 - y, x0 - x:x1 - x]
+    a = (patch[:, :, 3:4].astype(np.float32) / 255.0) * alpha
+    dst[y0:y1, x0:x1] = (patch[:, :, :3] * a + dst[y0:y1, x0:x1] * (1 - a)).astype(np.uint8)
 
 
 def jagged_path(
@@ -92,12 +106,12 @@ CHIDORI = EffectSpec(
 )
 
 # Effects are matched by jutsu name. Unlisted jutsu simply show the banner.
-EFFECTS: dict[str, EffectSpec] = {
-    "Chidori": CHIDORI,
-}
+# Values are either an EffectSpec (procedural) or a TransformSpec (sprite); the caller
+# builds the matching effect class.
+EFFECTS: dict[str, object] = {}
 
 
-def effect_for(jutsu_name: str | None) -> EffectSpec | None:
+def effect_for(jutsu_name: str | None):
     return EFFECTS.get(jutsu_name) if jutsu_name else None
 
 
@@ -195,6 +209,10 @@ class AnchorTracker:
         self.damping = damping
         self.centre: tuple[float, float] | None = None
         self.radius = 0.0
+        # Smoothed box extent. `radius` suits a round effect; a sprite needs a real
+        # height, and deriving one back out of `radius` is a units error waiting to
+        # happen -- so the tracker keeps what it actually measured.
+        self.size: tuple[float, float] = (0.0, 0.0)
         self.velocity = (0.0, 0.0)
         self.last_seen: float | None = None
         self.last_update: float | None = None
@@ -211,15 +229,17 @@ class AnchorTracker:
             target = ((x1 + x2) / 2, (y1 + y2) / 2)
             target_r = max(x2 - x1, y2 - y1) * 0.62
 
+            target_size = (x2 - x1, y2 - y1)
             if self.centre is None:
                 self.centre, self.radius, self.velocity = target, target_r, (0.0, 0.0)
+                self.size = target_size
             else:
                 dx, dy = target[0] - self.centre[0], target[1] - self.centre[1]
                 if (dx * dx + dy * dy) ** 0.5 > self.snap_distance:
                     # A jump this large is the model relocating, not a hand moving.
                     # Smoothing it would drag the effect across the frame.
                     self.centre, self.velocity = target, (0.0, 0.0)
-                    self.radius = target_r
+                    self.radius, self.size = target_r, target_size
                 else:
                     # Adaptive smoothing. A fixed factor cannot win: heavy enough to
                     # kill a few pixels of jitter is far too heavy to follow a hand
@@ -235,6 +255,8 @@ class AnchorTracker:
                                          (moved[1] - self.centre[1]) / dt)
                     self.centre = moved
                     self.radius += (target_r - self.radius) * a
+                    self.size = (self.size[0] + (target_size[0] - self.size[0]) * a,
+                                 self.size[1] + (target_size[1] - self.size[1]) * a)
             self.last_seen = now
 
         elif self.centre is not None and self.last_seen is not None:
@@ -256,5 +278,168 @@ class AnchorTracker:
     def reset(self) -> None:
         self.centre = None
         self.radius = 0.0
+        self.size = (0.0, 0.0)
         self.velocity = (0.0, 0.0)
         self.last_seen = self.last_update = None
+
+
+# --------------------------------------------------------------------------------------
+# Sprite transformation (smoke puff, then a character standing where you are)
+# --------------------------------------------------------------------------------------
+
+def key_background(bgr: np.ndarray, tolerance: int = 8) -> np.ndarray:
+    """Build an alpha channel by flood-filling the background inward from the border.
+
+    Thresholding on "near white" is the obvious approach and the wrong one -- it punches
+    holes through every pale part of the subject. Filling from the border only removes
+    background actually connected to the edge, so interior light areas survive.
+
+    A second pass keeps only components that touch the border, repairing leaks where an
+    anti-aliased edge lets the fill seep into the subject.
+
+    Tolerance is not "smaller is safer": a checkerboard transparency backdrop alternates
+    between two values, so too tight a tolerance cannot swallow both and leaves speckle.
+    """
+    h, w = bgr.shape[:2]
+    mask = np.zeros((h + 2, w + 2), np.uint8)
+    work = bgr.copy()
+    flags = 4 | cv2.FLOODFILL_MASK_ONLY | (255 << 8)
+    seeds = [(x, y) for x in range(0, w, 2) for y in (0, h - 1)]
+    seeds += [(x, y) for y in range(0, h, 2) for x in (0, w - 1)]
+    for x, y in seeds:
+        if mask[y + 1, x + 1] == 0:
+            cv2.floodFill(work, mask, (x, y), 0,
+                          (tolerance,) * 3, (tolerance,) * 3, flags)
+
+    background = (mask[1:h + 1, 1:w + 1] > 0).astype(np.uint8)
+    count, labels = cv2.connectedComponents(background)
+    border_labels = {int(v) for row in
+                     (labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1])
+                     for v in row} - {0}
+    background = np.isin(labels, list(border_labels)).astype(np.uint8)
+    return np.where(background > 0, 0, 255).astype(np.uint8)
+
+
+def load_sprite(path: str | Path, tolerance: int = 8) -> np.ndarray:
+    """Load an RGBA sprite, keying a flat background if the file has no usable alpha.
+
+    Returns the image cropped to its opaque bounds, so placement can align to the subject
+    rather than to whatever padding the source file happened to carry.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"sprite not found: {path}")
+    raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if raw is None:
+        raise ValueError(f"could not decode {path}")
+
+    if raw.ndim == 3 and raw.shape[2] == 4 and (raw[:, :, 3] < 250).mean() > 0.02:
+        rgba = raw
+    else:
+        bgr = raw[:, :, :3] if raw.ndim == 3 else cv2.cvtColor(raw, cv2.COLOR_GRAY2BGR)
+        rgba = np.dstack([bgr, key_background(bgr, tolerance)])
+
+    # Pull the alpha in by a pixel. Edge pixels are a blend of subject and the old
+    # background, so keeping them draws a bright halo around the whole sprite.
+    alpha = cv2.erode(rgba[:, :, 3], np.ones((3, 3), np.uint8), iterations=1)
+    rgba[:, :, 3] = cv2.GaussianBlur(alpha, (0, 0), 0.8)
+
+    ys, xs = np.where(rgba[:, :, 3] > 16)
+    if len(xs) == 0:
+        raise ValueError(f"{path} is fully transparent after keying")
+    return rgba[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+
+
+@dataclass
+class TransformSpec:
+    """Timing and placement for a sprite transformation."""
+    duration: float = 6.0
+    smoke_s: float = 0.55          # puff covers the swap for this long
+    fade: float = 0.5
+    scale: float = 1.3             # sprite height relative to the person box height
+    smoke_colour: tuple[int, int, int] = (232, 232, 236)
+    puffs: int = 16
+
+
+class TransformEffect:
+    """A puff of smoke, then a character sprite standing where the person is.
+
+    The sprite covers the person rather than replacing their pixels, which is why no
+    background inpainting is needed -- and why the smoke matters: it hides the instant
+    of the swap, exactly as the source material does.
+    """
+
+    def __init__(self, spec: TransformSpec, sprite: np.ndarray, seed: int | None = None):
+        self.spec = spec
+        self.sprite = sprite
+        self.rng = np.random.default_rng(seed)
+
+    def sprite_alpha(self, age: float) -> float:
+        s = self.spec
+        if age < s.smoke_s * 0.55:
+            return 0.0                                  # still hidden by the puff
+        if age > s.duration - s.fade:
+            return max(0.0, (s.duration - age) / s.fade)
+        ramp = (age - s.smoke_s * 0.55) / max(s.smoke_s * 0.45, 1e-6)
+        return min(1.0, ramp)
+
+    def smoke_alpha(self, age: float) -> float:
+        s = self.spec
+        if age < 0 or age > s.smoke_s:
+            return 0.0
+        return float(np.sin(np.pi * min(1.0, age / s.smoke_s)) ** 0.6)
+
+    def _draw_smoke(self, frame, centre, radius, age) -> None:
+        level = self.smoke_alpha(age)
+        if level <= 0.01:
+            return
+        H, W = frame.shape[:2]
+        grow = 0.55 + 1.15 * (age / max(self.spec.smoke_s, 1e-6))
+        layer = np.zeros_like(frame)
+        for _ in range(self.spec.puffs):
+            angle = self.rng.uniform(0, 2 * math.pi)
+            dist = self.rng.uniform(0, radius * 0.9) * grow
+            px = int(centre[0] + math.cos(angle) * dist)
+            py = int(centre[1] + math.sin(angle) * dist * 1.15)
+            pr = int(self.rng.uniform(0.30, 0.62) * radius * grow)
+            cv2.circle(layer, (px, py), max(4, pr), self.spec.smoke_colour, -1)
+        layer = cv2.GaussianBlur(layer, (0, 0), max(6.0, radius * 0.16))
+        cv2.addWeighted(frame, 1.0, layer, level, 0, frame)
+
+    def _draw_sprite(self, frame, centre, radius, age) -> None:
+        """`radius` is half the person box HEIGHT, not the lightning-style radius."""
+        level = self.sprite_alpha(age)
+        if level <= 0.01:
+            return
+        H, W = frame.shape[:2]
+        sh, sw = self.sprite.shape[:2]
+        target_h = max(16, int(radius * 2 * self.spec.scale))
+        target_w = max(8, int(sw * target_h / sh))
+        resized = cv2.resize(self.sprite, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
+        # Top-aligned to the person box, not centred: on a torso-up webcam shot the box
+        # ends at the chest, so centring would sink her head into the middle of the body.
+        x = int(centre[0] - target_w / 2)
+        y = int(centre[1] - radius)
+        blit_rgba(frame, resized, x, y, level)
+
+    def draw(self, frame: np.ndarray, centre: tuple[float, float],
+             radius: float, age: float) -> np.ndarray:
+        """`radius` is half the person box height; see `_draw_sprite`."""
+        if age < 0 or age > self.spec.duration:
+            return frame
+        self._draw_sprite(frame, centre, radius, age)
+        self._draw_smoke(frame, centre, radius, age)     # smoke sits in front
+        return frame
+
+
+TRANSFORMATION = TransformSpec(
+    duration=6.0,
+    smoke_s=0.55,
+    scale=1.3,
+)
+
+EFFECTS.update({
+    "Chidori": CHIDORI,
+    "Transformation Jutsu": TRANSFORMATION,
+})

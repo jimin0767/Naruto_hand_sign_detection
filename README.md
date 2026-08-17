@@ -44,6 +44,7 @@ Weights are **not** in this repo — download `best.pt` (and `best.onnx`) from t
 | **Card strip, bottom** | signs recognised so far: kanji above, English below. The same sign twice in a row does not stack |
 | **Orange banner** | a completed jutsu; it replaces the card strip for a few seconds |
 | **Lightning** | Chidori's effect, tracking your hand for 5 s (`--effect-seconds` to change) |
+| **Smoke, then a character** | Transformation Jutsu, tracking your whole body for 6 s |
 
 **If a sign will not commit,** watch the brackets and the stability bar. Grey brackets mean
 the model sees the sign but is not confident enough to count it — the bar stalls partway
@@ -134,8 +135,31 @@ immediately since that is the model relocating, not a hand moving.
 This works at all *because* of the model's main weakness: it always emits a box whether or
 not you are making a valid sign — useless for recognition, serviceable as a hand tracker.
 
+**Transformation Jutsu** does a puff of smoke and then draws a character sprite standing
+where you are, tracked with `yolo11n` person detection. The sprite *covers* you rather than
+replacing your pixels, which is why no background inpainting is needed — and why the smoke
+matters: it hides the instant of the swap, exactly as the source material does.
+
+The image is **not in this repo** — character art is copyrighted, so supply your own:
+
+```bash
+# any forward-facing cutout, roughly 600-1000px tall
+cp your_character.png assets/sakura.png
+python 04_demo.py                       # or --transform-image path/to/other.png
+```
+
+A transparent PNG is ideal, but a flat white or checkerboard background is keyed
+automatically by flood-filling inward from the border. Thresholding on "near white" is the
+obvious approach and the wrong one — it punches holes through pale parts of the subject;
+filling from the border only removes background actually connected to the edge. If the
+sprite looks too large or small for you, adjust `--transform-scale` (default 1.3, meaning
+sprite height = 1.3x your detected person box).
+
+`assets/` is gitignored. Teammates supply their own copy.
+
 Add more in `handsign/effects.py` — `EFFECTS` maps a jutsu name to an `EffectSpec`
-(colours, duration, bolt count). A name that does not match the table is caught by tests.
+(procedural) or a `TransformSpec` (sprite). A name that does not match the jutsu table is
+caught by tests.
 
 `load_jutsu` rejects any sign the model cannot detect, and warns if a jutsu is
 **unreachable** — a shorter jutsu completing partway through a longer one clears the
