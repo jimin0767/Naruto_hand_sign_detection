@@ -23,173 +23,25 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from collections import Counter, deque
-from dataclasses import dataclass, field
+from collections import deque
 from pathlib import Path
 
 import cv2
 import yaml
 
-CANONICAL = [
-    "bird", "boar", "dog", "dragon", "hare", "horse",
-    "monkey", "ox", "ram", "rat", "snake", "tiger",
-]
+from handsign import (
+    CANONICAL,
+    DEFAULT_ACCEPT_CONF,
+    DEFAULT_CONF,
+    HandSignDetector,
+    HandSignError,
+    Jutsu,
+    SequenceTracker,
+    SignSmoother,
+    load_jutsu,
+)
 
-# Measured on the held-out subject: 0.25 gives 92.1% top-1, while 0.5 drops to 85.2%
-# because 12% of frames stop detecting anything at all. Raising this makes the demo look
-# cleaner per-box while actually losing more signs.
-DEFAULT_CONF = 0.25
-
-
-class DemoError(RuntimeError):
-    """Raised on unusable configuration or an unopenable video source."""
-
-
-# --------------------------------------------------------------------------------------
-# Temporal smoothing
-# --------------------------------------------------------------------------------------
-
-class SignSmoother:
-    """Turn noisy per-frame predictions into stable, de-duplicated sign events.
-
-    Two problems to solve at once. Flicker: a held sign occasionally misreads for a frame
-    or two. Repetition: a sign held for a second produces 30 identical frames, which must
-    register as *one* sign, not thirty.
-
-    Both fall out of tracking a "held" sign. A new sign is emitted only when the window
-    agrees on something different from what is currently held; the held sign clears when
-    the window agrees the hands are down, which is what lets the same sign be performed
-    twice in a row.
-    """
-
-    def __init__(self, window: int = 9, min_votes: int = 6, clear_votes: int = 6):
-        if min_votes > window or clear_votes > window:
-            raise DemoError(
-                f"min_votes ({min_votes}) and clear_votes ({clear_votes}) cannot exceed "
-                f"window ({window}); the threshold would be unreachable"
-            )
-        self.window: deque[str | None] = deque(maxlen=window)
-        self.min_votes = min_votes
-        self.clear_votes = clear_votes
-        self.held: str | None = None
-
-    def update(self, prediction: str | None) -> str | None:
-        """Feed one frame's top-1 class (or None). Returns a newly confirmed sign, if any."""
-        self.window.append(prediction)
-        counts = Counter(p for p in self.window if p is not None)
-
-        if counts:
-            candidate, votes = counts.most_common(1)[0]
-            if votes >= self.min_votes:
-                if candidate != self.held:
-                    self.held = candidate
-                    return candidate
-                return None
-
-        if sum(1 for p in self.window if p is None) >= self.clear_votes:
-            self.held = None
-        return None
-
-    @property
-    def stability(self) -> float:
-        """Fraction of the window agreeing with the held sign -- shown as a progress bar."""
-        if not self.window or self.held is None:
-            return 0.0
-        return sum(1 for p in self.window if p == self.held) / self.window.maxlen
-
-    def reset(self) -> None:
-        self.window.clear()
-        self.held = None
-
-
-# --------------------------------------------------------------------------------------
-# Sequence matching
-# --------------------------------------------------------------------------------------
-
-@dataclass
-class Jutsu:
-    name: str
-    english: str
-    signs: list[str]
-
-
-@dataclass
-class SequenceTracker:
-    """Accumulate confirmed signs and report when the tail matches a known jutsu."""
-
-    jutsu: list[Jutsu]
-    timeout_s: float = 4.0
-    max_length: int = 16
-    buffer: list[str] = field(default_factory=list)
-    last_sign_at: float = 0.0
-    matched: Jutsu | None = None
-    matched_at: float = 0.0
-
-    def __post_init__(self) -> None:
-        # Longest first, so a 6-sign jutsu wins over a 3-sign one sharing its ending.
-        self.jutsu = sorted(self.jutsu, key=lambda j: len(j.signs), reverse=True)
-
-    def add(self, sign: str, now: float) -> Jutsu | None:
-        self.buffer.append(sign)
-        del self.buffer[: max(0, len(self.buffer) - self.max_length)]
-        self.last_sign_at = now
-
-        for candidate in self.jutsu:
-            n = len(candidate.signs)
-            if n and self.buffer[-n:] == candidate.signs:
-                self.matched = candidate
-                self.matched_at = now
-                self.buffer.clear()   # consume, so the next attempt starts clean
-                return candidate
-        return None
-
-    def tick(self, now: float) -> None:
-        """Expire a stale partial sequence. Call once per frame."""
-        if self.buffer and now - self.last_sign_at > self.timeout_s:
-            self.buffer.clear()
-
-    def banner(self, now: float, hold_s: float = 3.0) -> Jutsu | None:
-        """The jutsu to display right now, or None once its moment has passed."""
-        if self.matched and now - self.matched_at <= hold_s:
-            return self.matched
-        return None
-
-    def progress(self) -> list[tuple[Jutsu, int]]:
-        """Jutsu whose opening signs match the buffer, with how far along each is."""
-        out = []
-        for candidate in self.jutsu:
-            for depth in range(len(self.buffer), 0, -1):
-                if candidate.signs[:depth] == self.buffer[-depth:]:
-                    out.append((candidate, depth))
-                    break
-        return sorted(out, key=lambda pair: -pair[1])
-
-
-def load_jutsu(path: Path) -> list[Jutsu]:
-    """Read and validate jutsu.yaml, rejecting signs the model cannot produce."""
-    if not path.exists():
-        raise DemoError(f"{path} not found")
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    entries = raw.get("jutsu") or []
-    if not entries:
-        raise DemoError(f"{path} defines no jutsu")
-
-    out = []
-    for entry in entries:
-        signs = [str(s).strip().lower() for s in entry.get("signs", [])]
-        if not signs:
-            raise DemoError(f"jutsu {entry.get('name')!r} has no signs")
-        unknown = sorted(set(signs) - set(CANONICAL))
-        if unknown:
-            # Gassho and Mizunoe land here: real signs the reference project detects but
-            # this model was never trained on. Failing loudly beats a jutsu that silently
-            # can never fire.
-            raise DemoError(
-                f"jutsu {entry.get('name')!r} uses sign(s) {unknown} that this model "
-                f"cannot detect. Valid signs: {CANONICAL}"
-            )
-        out.append(Jutsu(str(entry.get("name", "?")), str(entry.get("english", "")), signs))
-    return out
+DemoError = HandSignError
 
 
 # --------------------------------------------------------------------------------------
@@ -288,7 +140,7 @@ def main() -> int:
                         help="smoothing window in frames; at ~78 FPS, 25 is about 0.3s")
     parser.add_argument("--min-votes", type=int, default=18)
     parser.add_argument(
-        "--accept-conf", type=float, default=0.60,
+        "--accept-conf", type=float, default=DEFAULT_ACCEPT_CONF,
         help="a frame only votes toward a sign above this confidence, separate from "
              "--conf which controls what is drawn. Every training image contains exactly "
              "one sign, so the model has no 'not a sign' output and will name one for "
@@ -311,8 +163,8 @@ def main() -> int:
     jutsu = load_jutsu(args.jutsu)
     print(f"loaded {len(jutsu)} jutsu from {args.jutsu}")
 
-    from ultralytics import YOLO
-    model = YOLO(str(args.weights))
+    detector = HandSignDetector(args.weights, conf=args.conf, imgsz=args.imgsz,
+                                device=args.device)
 
     cap = open_source(args.source)
     smoother = SignSmoother(args.window, args.min_votes)
@@ -331,19 +183,10 @@ def main() -> int:
                 frame = cv2.flip(frame, 1)   # selfie view
 
             started = time.perf_counter()
-            result = model.predict(frame, conf=args.conf, imgsz=args.imgsz,
-                                   device=args.device, verbose=False)[0]
-
-            box = label = None
-            confidence = 0.0
-            boxes = result.boxes
-            if len(boxes):
-                # Top-1: the demo commits to one sign per frame, which is how the 92%
-                # figure was measured. Scoring every box tells a different, worse story.
-                best = int(boxes.conf.argmax())
-                box = boxes.xyxy[best].tolist()
-                label = CANONICAL[int(boxes.cls[best])]
-                confidence = float(boxes.conf[best])
+            hit = detector.detect(frame)
+            box = hit.box if hit else None
+            label = hit.name if hit else None
+            confidence = hit.confidence if hit else 0.0
 
             now = time.time()
             # Two thresholds. The box is drawn above --conf so you can see what the model

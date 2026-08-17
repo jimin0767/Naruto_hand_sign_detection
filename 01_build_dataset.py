@@ -32,11 +32,11 @@ from PIL import Image
 # --------------------------------------------------------------------------------------
 
 # English alphabetical, matching the ordering used by the majority of sources.
-CANONICAL: list[str] = [
-    "bird", "boar", "dog", "dragon", "hare", "horse",
-    "monkey", "ox", "ram", "rat", "snake", "tiger",
-]
-CANONICAL_INDEX: dict[str, int] = {name: i for i, name in enumerate(CANONICAL)}
+# The single source of truth for class order lives in handsign/classes.py.
+# Four copies of this list is how the index-mismatch bug comes back.
+from handsign.classes import CANONICAL as _C, CANONICAL_INDEX
+
+CANONICAL = list(_C)  # noqa: E402
 
 # Every spelling observed across the twelve sources, mapped to canonical English.
 # Romaji entries matter most: `otani` and `chayawat` order their classes by the romaji

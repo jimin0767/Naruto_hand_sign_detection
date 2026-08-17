@@ -26,10 +26,11 @@ from pathlib import Path
 
 import yaml
 
-CANONICAL = [
-    "bird", "boar", "dog", "dragon", "hare", "horse",
-    "monkey", "ox", "ram", "rat", "snake", "tiger",
-]
+# The single source of truth for class order lives in handsign/classes.py.
+# Four copies of this list is how the index-mismatch bug comes back.
+from handsign.classes import CANONICAL as _C
+
+CANONICAL = list(_C)  # noqa: E402
 
 # Augmentation rationale, per the spec:
 #   hsv_s/hsv_v raised  -- skin tone and lighting are the scarcest diversity axes

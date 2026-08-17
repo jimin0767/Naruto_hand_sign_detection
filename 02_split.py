@@ -31,10 +31,11 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-CANONICAL = [
-    "bird", "boar", "dog", "dragon", "hare", "horse",
-    "monkey", "ox", "ram", "rat", "snake", "tiger",
-]
+# The single source of truth for class order lives in handsign/classes.py.
+# Four copies of this list is how the index-mismatch bug comes back.
+from handsign.classes import CANONICAL as _C
+
+CANONICAL = list(_C)  # noqa: E402
 
 # Sources whose *group* is held out. Named per source; the group each belongs to is
 # discovered at runtime, so naming any member holds out the whole component.

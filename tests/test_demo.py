@@ -250,5 +250,7 @@ class TestIntegration:
         assert demo.DEFAULT_CONF == 0.25
 
     def test_canonical_matches_training(self):
+        """Compared as sequences: the package exports a tuple, scripts wrap it in a list
+        because yaml.safe_dump emits a Python-specific tag for tuples."""
         train = _load("train_for_demo_compare", "03_train.py")
-        assert demo.CANONICAL == train.CANONICAL
+        assert list(demo.CANONICAL) == list(train.CANONICAL)
