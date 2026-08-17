@@ -29,3 +29,6 @@ Thumbs.db
 .DS_Store
 .vscode/
 .idea/
+
+# Regenerable demo media
+*.mp4

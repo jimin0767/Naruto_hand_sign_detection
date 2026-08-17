@@ -1,0 +1,59 @@
+# Jutsu sign sequences.
+#
+# IMPORTANT -- verify these before presenting them. Hand-sign sequences differ between the
+# manga, the anime, and the databooks, and several widely-circulated lists disagree with
+# each other. Treat this file as a starting point you own, not as canon: it is data, not
+# code, precisely so you can correct it without touching the demo.
+#
+# Only the 12 zodiac signs are usable here. The reference project also detects Gassho
+# (hand clap) and Mizunoe, which no public dataset in this project covers -- so jutsu whose
+# sequences include those signs cannot be triggered and are omitted. See spec section 5.1.
+#
+# Valid signs:
+#   bird boar dog dragon hare horse monkey ox ram rat snake tiger
+#
+# Sequences are matched against the tail of the recognised sign buffer, longest first, so
+# a 6-sign jutsu wins over a 3-sign one that happens to share its ending.
+
+jutsu:
+  - name: "Henge no Jutsu"
+    english: "Transformation"
+    signs: [dog, boar, ram]
+
+  - name: "Bunshin no Jutsu"
+    english: "Clone"
+    signs: [ram, snake, tiger]
+
+  - name: "Kawarimi no Jutsu"
+    english: "Substitution"
+    signs: [ram, boar, ox, dog, snake]
+
+  - name: "Kuchiyose no Jutsu"
+    english: "Summoning"
+    signs: [boar, dog, bird, monkey, ram]
+
+  - name: "Chidori / Raikiri"
+    english: "Thousand Birds / Lightning Blade"
+    signs: [ox, hare, monkey]
+
+  - name: "Katon: Gokakyu no Jutsu"
+    english: "Fire Release: Great Fireball"
+    signs: [snake, ram, monkey, boar, horse, tiger]
+
+  - name: "Katon: Hosenka no Jutsu"
+    english: "Fire Release: Phoenix Flower"
+    signs: [rat, tiger, dog, ox, hare, tiger]
+
+  - name: "Doton: Doryuheki"
+    english: "Earth Release: Earth Wall"
+    signs: [tiger, hare, boar, dog]
+
+  # Short practice entries -- handy for demoing the sequence logic without performing a
+  # six-sign combo on camera. Delete them for a real presentation.
+  - name: "[practice] two-sign"
+    english: "tiger then snake"
+    signs: [tiger, snake]
+
+  - name: "[practice] three-sign"
+    english: "rat, ox, tiger"
+    signs: [rat, ox, tiger]

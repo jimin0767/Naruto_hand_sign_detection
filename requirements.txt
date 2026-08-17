@@ -1,0 +1,18 @@
+# Inference + demo
+ultralytics>=8.4,<9          # pulls torch, torchvision, opencv-python, numpy, pillow
+PyYAML>=6.0
+
+# Dataset pipeline (01_build_dataset.py, 02_split.py)
+# numpy and pillow arrive with ultralytics; listed for clarity
+numpy>=1.26
+pillow>=10.0
+
+# Model export for game engines (05_export.py)
+onnx>=1.16
+onnxruntime>=1.18            # use onnxruntime-gpu for CUDA inference
+
+# Tests
+pytest>=8.0
+
+# For CUDA training, install torch from the appropriate index first, e.g.:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu126
