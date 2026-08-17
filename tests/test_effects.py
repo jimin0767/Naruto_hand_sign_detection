@@ -12,6 +12,7 @@ import pytest
 from handsign.effects import (
     CHIDORI,
     EFFECTS,
+    AnchorTracker,
     EffectSpec,
     LightningEffect,
     effect_for,
@@ -178,3 +179,114 @@ class TestRegistry:
         from handsign import load_jutsu
         names = {j.name for j in load_jutsu(Path(__file__).resolve().parents[1] / "jutsu.csv")}
         assert set(EFFECTS) <= names, f"no such jutsu: {set(EFFECTS) - names}"
+
+
+class TestAnchorTracker:
+    """The anchor decides whether the effect looks stuck to the hand or floating near it."""
+
+    def _run(self, tracker, boxes, dt=0.033):
+        return [tracker.update(b, i * dt) for i, b in enumerate(boxes)]
+
+    def test_first_box_is_adopted_immediately(self):
+        t = AnchorTracker()
+        (centre, radius) = t.update((100.0, 100.0, 200.0, 200.0), 0.0)
+        assert centre == (150.0, 150.0)
+        assert radius == pytest.approx(62.0)
+
+    def test_returns_none_before_any_detection(self):
+        assert AnchorTracker().update(None, 0.0) is None
+
+    def test_small_jitter_is_damped(self):
+        """A few pixels of wobble must not make the effect vibrate."""
+        t = AnchorTracker()
+        t.update((100.0, 100.0, 200.0, 200.0), 0.0)
+        deviations = []
+        for i, d in enumerate([3, -3, 3, -3, 2, -2], 1):
+            (cx, _), _ = t.update((100.0 + d, 100.0, 200.0 + d, 200.0), i * 0.033)
+            deviations.append(abs(cx - 150.0))
+        assert max(deviations) < 2.0
+
+    def test_fast_motion_is_followed_closely(self):
+        """Adaptive smoothing: a fixed factor heavy enough to kill jitter lags badly here."""
+        t = AnchorTracker()
+        t.update((100.0, 100.0, 200.0, 200.0), 0.0)
+        for i in range(1, 8):
+            x = 100.0 + 40 * i
+            (cx, _), _ = t.update((x, 100.0, x + 100.0, 200.0), i * 0.033)
+        assert abs((150.0 + 40 * 7) - cx) < 30.0
+
+    def test_adaptive_beats_fixed_smoothing_on_fast_motion(self):
+        """Pins the reason the adaptive term exists."""
+        lags = {}
+        for name, snap in (("adaptive", 160.0), ("effectively_fixed", 1e9)):
+            t = AnchorTracker(snap_distance=snap)
+            t.update((100.0, 100.0, 200.0, 200.0), 0.0)
+            for i in range(1, 8):
+                x = 100.0 + 40 * i
+                (cx, _), _ = t.update((x, 100.0, x + 100.0, 200.0), i * 0.033)
+            lags[name] = abs((150.0 + 40 * 7) - cx)
+        assert lags["adaptive"] < lags["effectively_fixed"] * 0.6
+
+    def test_large_jump_snaps_instead_of_sliding(self):
+        """A jump this big is the model relocating, not a hand moving."""
+        t = AnchorTracker(snap_distance=100.0)
+        t.update((0.0, 0.0, 100.0, 100.0), 0.0)
+        (centre, _) = t.update((500.0, 0.0, 600.0, 100.0), 0.033)
+        assert centre == (550.0, 50.0)
+
+    def test_dropout_coasts_then_holds(self):
+        t = AnchorTracker(coast_s=0.1)
+        t.update((0.0, 0.0, 100.0, 100.0), 0.0)
+        for i in range(1, 5):
+            t.update((40.0 * i, 0.0, 100.0 + 40.0 * i, 100.0), i * 0.033)
+        moving = t.centre[0]
+        (coasted, _), _ = t.update(None, 0.20)
+        assert coasted > moving                      # kept gliding
+        held = t.centre[0]
+        for k in range(6):
+            t.update(None, 0.5 + k * 0.033)
+        assert t.centre[0] == pytest.approx(held, abs=1e-6)   # then parked
+
+    def test_position_survives_a_long_dropout(self):
+        """Hands leaving frame must not send the effect to the origin."""
+        t = AnchorTracker()
+        t.update((300.0, 200.0, 400.0, 300.0), 0.0)
+        for i in range(1, 40):
+            result = t.update(None, i * 0.033)
+        assert result is not None
+        assert result[0][0] == pytest.approx(350.0, abs=30.0)
+
+    def test_radius_is_smoothed_too(self):
+        t = AnchorTracker()
+        t.update((0.0, 0.0, 100.0, 100.0), 0.0)
+        before = t.radius
+        (_, radius) = t.update((0.0, 0.0, 200.0, 200.0), 0.033)
+        assert before < radius < 200.0 * 0.62        # moved toward, not jumped to
+
+    def test_reset_clears_state(self):
+        t = AnchorTracker()
+        t.update((0.0, 0.0, 100.0, 100.0), 0.0)
+        t.reset()
+        assert t.centre is None and t.update(None, 1.0) is None
+
+    def test_zero_dt_does_not_divide_by_zero(self):
+        t = AnchorTracker()
+        t.update((0.0, 0.0, 100.0, 100.0), 5.0)
+        t.update((10.0, 0.0, 110.0, 100.0), 5.0)     # identical timestamp
+
+    def test_converges_on_a_stationary_hand(self):
+        t = AnchorTracker()
+        for i in range(40):
+            (centre, _) = t.update((100.0, 100.0, 200.0, 200.0), i * 0.033)
+        assert centre == pytest.approx((150.0, 150.0), abs=0.5)
+
+
+class TestDurationOverride:
+    def test_spec_duration_is_replaceable(self):
+        from dataclasses import replace
+        longer = replace(CHIDORI, duration=9.0)
+        assert LightningEffect(longer).intensity(7.0) == 1.0
+        assert LightningEffect(CHIDORI).intensity(7.0) == 0.0
+
+    def test_default_is_the_longer_duration(self):
+        assert CHIDORI.duration >= 5.0

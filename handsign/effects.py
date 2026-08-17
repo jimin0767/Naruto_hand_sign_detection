@@ -85,7 +85,7 @@ class EffectSpec:
 CHIDORI = EffectSpec(
     core=(255, 250, 235),       # very slightly cool white
     glow=(255, 165, 45),        # saturated electric blue in BGR
-    duration=2.6,
+    duration=5.0,
     bolts=15,                   # denser reads as electricity; sparse reads as cracks
     radius_scale=1.0,
     flash=0.34,
@@ -167,3 +167,94 @@ class LightningEffect:
             tint = np.full_like(frame, np.array(s.glow, np.uint8))
             cv2.addWeighted(frame, 1.0, tint, strength * 0.5, 0, frame)
         return frame
+
+
+class AnchorTracker:
+    """Smoothed hand position for anchoring an effect.
+
+    Raw detection boxes are unusable as an anchor for three reasons: they jitter a few
+    pixels every frame, they vanish entirely on frames where the model finds nothing, and
+    they occasionally jump across the frame when the model latches onto something else.
+    Attached directly, an effect vibrates, freezes, and teleports.
+
+    So: exponential smoothing for the jitter, short velocity-based coasting for dropouts,
+    and a snap threshold so a genuine large movement is followed immediately instead of
+    being slurred across half a second.
+    """
+
+    def __init__(
+        self,
+        smoothing: float = 0.45,
+        snap_distance: float = 160.0,
+        coast_s: float = 0.6,
+        damping: float = 0.85,
+    ):
+        self.smoothing = smoothing
+        self.snap_distance = snap_distance
+        self.coast_s = coast_s
+        self.damping = damping
+        self.centre: tuple[float, float] | None = None
+        self.radius = 0.0
+        self.velocity = (0.0, 0.0)
+        self.last_seen: float | None = None
+        self.last_update: float | None = None
+
+    def update(
+        self, box: tuple[float, float, float, float] | None, now: float
+    ) -> tuple[tuple[float, float], float] | None:
+        """Feed this frame's box (or None) and get the anchor to draw at."""
+        dt = 0.0 if self.last_update is None else max(0.0, now - self.last_update)
+        self.last_update = now
+
+        if box is not None:
+            x1, y1, x2, y2 = box
+            target = ((x1 + x2) / 2, (y1 + y2) / 2)
+            target_r = max(x2 - x1, y2 - y1) * 0.62
+
+            if self.centre is None:
+                self.centre, self.radius, self.velocity = target, target_r, (0.0, 0.0)
+            else:
+                dx, dy = target[0] - self.centre[0], target[1] - self.centre[1]
+                if (dx * dx + dy * dy) ** 0.5 > self.snap_distance:
+                    # A jump this large is the model relocating, not a hand moving.
+                    # Smoothing it would drag the effect across the frame.
+                    self.centre, self.velocity = target, (0.0, 0.0)
+                    self.radius = target_r
+                else:
+                    # Adaptive smoothing. A fixed factor cannot win: heavy enough to
+                    # kill a few pixels of jitter is far too heavy to follow a hand
+                    # moving quickly, which shows up as the effect trailing behind.
+                    # Scaling the factor with distance smooths small wobble hard while
+                    # following real movement almost immediately.
+                    distance = (dx * dx + dy * dy) ** 0.5
+                    reach = min(1.0, distance / max(self.snap_distance, 1e-6))
+                    a = self.smoothing + (0.95 - self.smoothing) * reach
+                    moved = (self.centre[0] + dx * a, self.centre[1] + dy * a)
+                    if dt > 1e-4:
+                        self.velocity = ((moved[0] - self.centre[0]) / dt,
+                                         (moved[1] - self.centre[1]) / dt)
+                    self.centre = moved
+                    self.radius += (target_r - self.radius) * a
+            self.last_seen = now
+
+        elif self.centre is not None and self.last_seen is not None:
+            # Coast on the last known velocity, decaying, so a brief dropout glides
+            # instead of freezing. Beyond coast_s the effect simply holds position --
+            # guessing further would send it drifting off screen.
+            if now - self.last_seen <= self.coast_s and dt > 0:
+                self.centre = (self.centre[0] + self.velocity[0] * dt,
+                               self.centre[1] + self.velocity[1] * dt)
+                self.velocity = (self.velocity[0] * self.damping,
+                                 self.velocity[1] * self.damping)
+            else:
+                self.velocity = (0.0, 0.0)
+
+        if self.centre is None:
+            return None
+        return self.centre, self.radius
+
+    def reset(self) -> None:
+        self.centre = None
+        self.radius = 0.0
+        self.velocity = (0.0, 0.0)
+        self.last_seen = self.last_update = None

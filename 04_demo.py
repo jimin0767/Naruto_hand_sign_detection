@@ -21,6 +21,7 @@ import argparse
 import sys
 import time
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -34,7 +35,7 @@ from handsign import (
     SignSmoother,
     load_jutsu,
 )
-from handsign.effects import LightningEffect, effect_for
+from handsign.effects import AnchorTracker, LightningEffect, effect_for
 from handsign.ui import Card, DemoUI, UIState
 
 DemoError = HandSignError
@@ -77,6 +78,8 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=3.0,
                         help="seconds after releasing a sign before the sequence resets")
     parser.add_argument("--width", type=int, default=960, help="camera panel width")
+    parser.add_argument("--effect-seconds", type=float, default=None,
+                        help="override how long a jutsu effect lasts")
     parser.add_argument("--no-mirror", action="store_true")
     parser.add_argument("--record", type=Path, default=None)
     parser.add_argument("--headless", action="store_true",
@@ -114,8 +117,9 @@ def main() -> int:
     jutsu_at = 0.0
     effect: LightningEffect | None = None
     effect_at = 0.0
-    last_centre: tuple[float, float] | None = None
-    last_radius = 0.0
+    # Runs every frame, not just during an effect, so the anchor is already warm and
+    # settled the instant a jutsu fires.
+    anchor = AnchorTracker()
     writer = None
     frame_times: deque[float] = deque(maxlen=30)
     print("running -- q or Esc to quit, r to reset the sequence")
@@ -148,6 +152,8 @@ def main() -> int:
                         cards = []
                         spec = effect_for(matched.name)
                         if spec:
+                            if args.effect_seconds:
+                                spec = replace(spec, duration=args.effect_seconds)
                             effect, effect_at = LightningEffect(spec), now
                         print(f"  *** {matched.name} ***"
                               + ("  [effect]" if spec else ""))
@@ -179,20 +185,14 @@ def main() -> int:
             scale = panel_w / frame.shape[1]
             if state.box:
                 state.box = tuple(v * scale for v in state.box)
-                x1, y1, x2, y2 = state.box
-                last_centre = ((x1 + x2) / 2, (y1 + y2) / 2)
-                last_radius = max(x2 - x1, y2 - y1) * 0.62
+            tracked = anchor.update(state.box, now)
 
             if effect is not None:
                 if now - effect_at > effect.spec.duration:
                     effect = None
-                else:
-                    # Anchored to the live box while hands stay visible, and to the last
-                    # known position once they leave -- the effect must not snap to the
-                    # frame origin the moment detection drops.
+                elif tracked is not None:
                     state.effect = effect
-                    state.effect_centre = last_centre
-                    state.effect_radius = last_radius
+                    state.effect_centre, state.effect_radius = tracked
                     state.effect_age = now - effect_at
             canvas = ui.render(frame, state, now)
 
@@ -213,6 +213,7 @@ def main() -> int:
                     smoother.reset()
                     tracker.buffer.clear()
                     cards, jutsu_name, effect = [], None, None
+                    anchor.reset()
                     print("  -- reset")
     finally:
         cap.release()

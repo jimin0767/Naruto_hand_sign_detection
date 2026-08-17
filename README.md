@@ -43,7 +43,7 @@ Weights are **not** in this repo — download `best.pt` (and `best.onnx`) from t
 | **Ring, top right** | countdown to sequence reset. Appears **only after you release a sign** — holding one steady never expires it |
 | **Card strip, bottom** | signs recognised so far: kanji above, English below. The same sign twice in a row does not stack |
 | **Orange banner** | a completed jutsu; it replaces the card strip for a few seconds |
-| **Lightning** | Chidori's effect, anchored to your hand for 2.6 s |
+| **Lightning** | Chidori's effect, tracking your hand for 5 s (`--effect-seconds` to change) |
 
 **If a sign will not commit,** watch the brackets and the stability bar. Grey brackets mean
 the model sees the sign but is not confident enough to count it — the bar stalls partway
@@ -120,10 +120,19 @@ Chidori casts procedural lightning on your hand. Bolts are regenerated every fra
 midpoint displacement rather than replaying a sprite animation — noise that never repeats
 reads as electricity, a looping clip reads as a sticker.
 
-The effect follows your hand using the live detection box, falling back to the last known
-position when your hands leave frame. This works *because* of the model's main weakness:
-it always emits a box whether or not you are making a valid sign, which is useless for
-recognition but serviceable as a hand tracker.
+The effect follows your hand via `AnchorTracker`, which cannot use the raw detection box:
+boxes jitter a few pixels every frame, vanish on frames the model misses, and occasionally
+jump across the frame. Attached directly, an effect vibrates, freezes, and teleports.
+
+So the smoothing factor **scales with how far the box moved** — small wobble is damped
+hard, real movement is followed almost immediately. A single fixed factor cannot do both:
+heavy enough to kill jitter lags roughly 47 px behind a fast hand, which is what "not
+following well" looks like. Adaptive smoothing halves that to ~22 px. Brief dropouts coast
+on the last velocity rather than freezing, and a jump beyond `snap_distance` is taken
+immediately since that is the model relocating, not a hand moving.
+
+This works at all *because* of the model's main weakness: it always emits a box whether or
+not you are making a valid sign — useless for recognition, serviceable as a hand tracker.
 
 Add more in `handsign/effects.py` — `EFFECTS` maps a jutsu name to an `EffectSpec`
 (colours, duration, bolt count). A name that does not match the table is caught by tests.
