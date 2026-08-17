@@ -199,16 +199,22 @@ def load_jutsu(path: Path) -> list[Jutsu]:
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
-def draw_overlay(frame, box, label, confidence, smoother, tracker, now, fps):
-    """Draw detection, smoothing state, sign buffer, and any matched jutsu."""
+def draw_overlay(frame, box, label, confidence, smoother, tracker, now, fps, voting=True):
+    """Draw detection, smoothing state, sign buffer, and any matched jutsu.
+
+    `voting` distinguishes a detection confident enough to count toward a sign from one
+    the model is merely guessing at -- drawn grey, so idle-hand false positives are
+    visible as rejected rather than invisible.
+    """
     height, width = frame.shape[:2]
+    accent = (0, 235, 60) if voting else (130, 130, 130)
 
     if box is not None:
         x1, y1, x2, y2 = (int(v) for v in box)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 235, 60), 2)
-        tag = f"{label} {confidence:.2f}"
+        cv2.rectangle(frame, (x1, y1), (x2, y2), accent, 2)
+        tag = f"{label} {confidence:.2f}" + ("" if voting else "  (ignored)")
         (tw, th), _ = cv2.getTextSize(tag, FONT, 0.6, 2)
-        cv2.rectangle(frame, (x1, max(0, y1 - th - 8)), (x1 + tw + 8, y1), (0, 235, 60), -1)
+        cv2.rectangle(frame, (x1, max(0, y1 - th - 8)), (x1 + tw + 8, y1), accent, -1)
         cv2.putText(frame, tag, (x1 + 4, max(th, y1 - 5)), FONT, 0.6, (0, 0, 0), 2)
 
     # Held sign + stability bar: shows *why* a sign has or hasn't registered yet.
@@ -278,8 +284,16 @@ def main() -> int:
     parser.add_argument("--source", default="0", help="webcam index or video path")
     parser.add_argument("--conf", type=float, default=DEFAULT_CONF)
     parser.add_argument("--imgsz", type=int, default=640)
-    parser.add_argument("--window", type=int, default=9, help="smoothing window in frames")
-    parser.add_argument("--min-votes", type=int, default=6)
+    parser.add_argument("--window", type=int, default=25,
+                        help="smoothing window in frames; at ~78 FPS, 25 is about 0.3s")
+    parser.add_argument("--min-votes", type=int, default=18)
+    parser.add_argument(
+        "--accept-conf", type=float, default=0.60,
+        help="a frame only votes toward a sign above this confidence, separate from "
+             "--conf which controls what is drawn. Every training image contains exactly "
+             "one sign, so the model has no 'not a sign' output and will name one for "
+             "idle hands -- but typically with lower confidence than a real sign.",
+    )
     parser.add_argument("--timeout", type=float, default=4.0,
                         help="seconds of inactivity before a partial sequence is cleared")
     parser.add_argument("--no-mirror", action="store_true")
@@ -332,7 +346,10 @@ def main() -> int:
                 confidence = float(boxes.conf[best])
 
             now = time.time()
-            confirmed = smoother.update(label)
+            # Two thresholds. The box is drawn above --conf so you can see what the model
+            # is thinking, but only a confident detection votes toward committing a sign.
+            voting_label = label if confidence >= args.accept_conf else None
+            confirmed = smoother.update(voting_label)
             if confirmed:
                 hit = tracker.add(confirmed, now)
                 print(f"  {confirmed:8s} -> [{' > '.join(tracker.buffer) or '(matched)'}]"
@@ -341,7 +358,8 @@ def main() -> int:
 
             fps_window.append(time.perf_counter() - started)
             fps = len(fps_window) / max(sum(fps_window), 1e-6)
-            frame = draw_overlay(frame, box, label, confidence, smoother, tracker, now, fps)
+            frame = draw_overlay(frame, box, label, confidence, smoother, tracker, now,
+                                 fps, voting=voting_label is not None)
 
             if args.record:
                 if writer is None:
