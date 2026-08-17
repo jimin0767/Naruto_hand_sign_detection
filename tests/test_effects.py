@@ -6,6 +6,8 @@ buffers near frame edges, so the bounds cases matter more than the aesthetics.
 
 from __future__ import annotations
 
+import math
+
 import cv2
 import numpy as np
 import pytest
@@ -16,6 +18,8 @@ from handsign.effects import (
     AnchorTracker,
     CloneEffect,
     CloneSpec,
+    DragonFireEffect,
+    DragonSpec,
     EffectSpec,
     TransformEffect,
     TransformSpec,
@@ -609,3 +613,110 @@ class TestCloneRegistry:
         kinds = {type(effect_for(n)).__name__
                  for n in ("Chidori", "Transformation Jutsu", "Clone Jutsu")}
         assert kinds == {"EffectSpec", "TransformSpec", "CloneSpec"}
+
+
+class TestDragonFire:
+    @pytest.fixture
+    def fx(self):
+        return DragonFireEffect(DragonSpec(), seed=0)
+
+    def test_spine_starts_at_the_mouth(self, fx):
+        pts = fx.spine((300.0, 200.0), (960, 540), 1.0)
+        assert pts[0] == pytest.approx((300.0, 200.0))
+
+    def test_spine_has_the_configured_segment_count(self, fx):
+        assert len(fx.spine((300.0, 200.0), (960, 540), 1.0)) == DragonSpec().segments
+
+    def test_body_grows_from_the_mouth(self, fx):
+        def reach(age):
+            pts = fx.spine((300.0, 200.0), (960, 540), age)
+            return math.hypot(pts[-1][0] - 300.0, pts[-1][1] - 200.0)
+        assert reach(0.2) < reach(0.5) < reach(1.0)
+
+    def test_growth_stops_at_full_length(self, fx):
+        assert fx.extent(0.8) == 1.0 and fx.extent(4.0) == 1.0
+
+    def test_undulation_animates(self, fx):
+        """A static flame shape reads as a smear; the travelling wave is the dragon."""
+        a = fx.spine((300.0, 200.0), (960, 540), 1.0)
+        b = fx.spine((300.0, 200.0), (960, 540), 1.25)
+        assert any(abs(p[1] - q[1]) > 1.0 for p, q in zip(a, b))
+
+    def test_wave_is_pinned_at_the_mouth(self, fx):
+        """Otherwise the tail slides off the face as the wave travels."""
+        for age in (0.9, 1.1, 1.4, 1.9):
+            assert fx.spine((300.0, 200.0), (960, 540), age)[0] == pytest.approx((300.0, 200.0))
+
+    def test_flip_reverses_the_launch_direction(self, fx):
+        right = fx.spine((300.0, 200.0), (960, 540), 1.0, flip=1.0)[-1]
+        left = fx.spine((300.0, 200.0), (960, 540), 1.0, flip=-1.0)[-1]
+        assert right[0] > 300.0 > left[0]
+
+    def test_launches_away_from_the_nearer_edge(self, frame):
+        """Fire aimed off the closest edge is wasted; it should fly into open picture."""
+        fx = DragonFireEffect(DragonSpec(), seed=1)
+        left_lit = frame.copy()
+        fx.draw(left_lit, (60.0, 120.0), 0.0, 1.5)
+        right_lit = np.full_like(frame, 30)
+        DragonFireEffect(DragonSpec(), seed=1).draw(right_lit, (580.0, 120.0), 0.0, 1.5)
+        assert left_lit[:, 400:].mean() > left_lit[:, :100].mean()
+        assert right_lit[:, :240].mean() > right_lit[:, 540:].mean()
+
+    def test_body_tapers_at_both_ends(self, fx):
+        pts = [(float(x), 100.0) for x in range(0, 460, 10)]
+        poly = fx._body_polygon(pts, 40.0)
+        n = len(pts)
+        def thickness(i):
+            return abs(poly[i][1] - poly[2 * n - 1 - i][1])
+        assert thickness(0) < thickness(n // 2)
+        assert thickness(n - 1) < thickness(n // 2)
+
+    def test_draw_brightens_the_frame(self, fx, frame):
+        before = frame.mean()
+        fx.draw(frame, (200.0, 120.0), 0.0, 1.5)
+        assert frame.mean() > before
+
+    def test_nothing_before_ignition_or_after_expiry(self, fx, frame):
+        for age in (-0.1, 0.0, 99.0):
+            copy = frame.copy()
+            fx.draw(copy, (200.0, 120.0), 0.0, age)
+            assert np.array_equal(copy, frame), f"drew something at age {age}"
+
+    def test_additive_saturates_rather_than_wrapping(self, frame):
+        frame[:] = 250
+        DragonFireEffect(DragonSpec(), seed=2).draw(frame, (200.0, 120.0), 0.0, 1.5)
+        assert frame.min() >= 250
+
+    def test_fire_is_warm_coloured(self, fx, frame):
+        """A BGR mix-up would make Fire Style come out blue."""
+        fx.draw(frame, (200.0, 120.0), 0.0, 1.5)
+        lit = frame[frame.max(axis=2) > 140]
+        assert len(lit) > 0
+        assert lit[:, 2].mean() > lit[:, 0].mean()
+
+    def test_consecutive_frames_differ(self, frame):
+        fx = DragonFireEffect(DragonSpec(), seed=4)
+        a, b = frame.copy(), frame.copy()
+        fx.draw(a, (200.0, 120.0), 0.0, 1.5)
+        fx.draw(b, (200.0, 120.0), 0.0, 1.5)
+        assert not np.array_equal(a, b)
+
+    @pytest.mark.parametrize("mouth", [(0.0, 0.0), (639.0, 359.0), (-50.0, 180.0)])
+    def test_offscreen_mouth_is_safe(self, fx, frame, mouth):
+        fx.draw(frame, mouth, 0.0, 1.5)
+
+    def test_fades_out_at_the_end(self, fx, frame):
+        mid, late = frame.copy(), frame.copy()
+        fx.draw(mid, (200.0, 120.0), 0.0, 2.0)
+        fx.draw(late, (200.0, 120.0), 0.0, DragonSpec().duration - 0.05)
+        assert late.mean() < mid.mean()
+
+
+class TestAllEffectsRegistered:
+    def test_four_jutsu_have_effects(self):
+        assert set(EFFECTS) == {"Chidori", "Transformation Jutsu",
+                                "Clone Jutsu", "Dragon Fire Jutsu"}
+
+    def test_each_uses_a_distinct_spec_type(self):
+        kinds = {type(v).__name__ for v in EFFECTS.values()}
+        assert kinds == {"EffectSpec", "TransformSpec", "CloneSpec", "DragonSpec"}

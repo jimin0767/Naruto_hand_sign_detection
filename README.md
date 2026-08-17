@@ -46,6 +46,7 @@ Weights are **not** in this repo — download `best.pt` (and `best.onnx`) from t
 | **Lightning** | Chidori's effect, tracking your hand for 5 s (`--effect-seconds` to change) |
 | **Smoke, then a character** | Transformation Jutsu, tracking your whole body for 6 s |
 | **A crowd of you** | Clone Jutsu, six copies mirroring your movement for 6 s |
+| **Fire from your mouth** | Dragon Fire Jutsu, a serpentine fire dragon for 5.5 s |
 
 **If a sign will not commit,** watch the brackets and the stability bar. Grey brackets mean
 the model sees the sign but is not confident enough to count it — the bar stalls partway
@@ -171,9 +172,28 @@ it sits on the frame edge, but a shrunk and lifted clone drags that line into op
 where it reads as a pasted rectangle, so the bottom of every cutout is dissolved into a
 gradient.
 
+**Dragon Fire Jutsu** breathes a fire dragon from your mouth, located from the COCO pose
+model's nose keypoint (the mouth sits just below it, offset by your eye separation so it
+holds at any distance).
+
+The dragon is a spine curve, not a sprite: a launch axis with a travelling sine wave across
+it, thickened into a tapered body and capped with a horned head. The wave phase advances
+with time, and that motion is what separates "a dragon" from "an orange smear" — a static
+flame shape reads as neither. Fire is three passes over the same silhouette — wide and dark
+blurred into a glow, mid orange, then a thin near-white core — composited additively so it
+behaves like light. The three passes are *weighted*: at equal brightness they add up to
+white, which looks like a pale smear rather than fire.
+
+Tune it to your framing without editing code:
+
+```bash
+python 04_demo.py --dragon-angle -0.35     # aim higher over your shoulder
+python 04_demo.py --dragon-length 0.65     # longer body
+```
+
 Add more in `handsign/effects.py` — `EFFECTS` maps a jutsu name to an `EffectSpec`
-(procedural), a `TransformSpec` (sprite), or a `CloneSpec`. A name that does not match the
-jutsu table is caught by tests.
+(procedural), `TransformSpec` (sprite), `CloneSpec` (segmentation), or `DragonSpec`. A name
+that does not match the jutsu table is caught by tests.
 
 `load_jutsu` rejects any sign the model cannot detect, and warns if a jutsu is
 **unreachable** — a shorter jutsu completing partway through a longer one clears the

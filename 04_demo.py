@@ -25,6 +25,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from handsign import (
     DEFAULT_ACCEPT_CONF,
@@ -39,6 +40,8 @@ from handsign.effects import (
     AnchorTracker,
     CloneEffect,
     CloneSpec,
+    DragonFireEffect,
+    DragonSpec,
     LightningEffect,
     TransformEffect,
     TransformSpec,
@@ -100,6 +103,12 @@ def main() -> int:
                         help="COCO model used to locate you during a sprite transform")
     parser.add_argument("--segment-model", default="yolo11n-seg.pt",
                         help="COCO segmentation model used to cut you out for clones")
+    parser.add_argument("--pose-model", default="yolo11n-pose.pt",
+                        help="COCO pose model used to find your mouth for fire jutsu")
+    parser.add_argument("--dragon-length", type=float, default=None,
+                        help="fire dragon body length as a fraction of frame width")
+    parser.add_argument("--dragon-angle", type=float, default=None,
+                        help="fire dragon launch angle in radians; negative aims upward")
     parser.add_argument("--clones", type=int, default=None,
                         help="how many copies Clone Jutsu creates (default 6)")
     parser.add_argument("--no-mirror", action="store_true")
@@ -146,6 +155,8 @@ def main() -> int:
     person_anchor = AnchorTracker(snap_distance=260.0)
     person_model = None
     segment_model = None
+    pose_model = None
+    mouth_anchor = AnchorTracker(snap_distance=180.0)
 
     sprite = None
     if args.transform_image.exists():
@@ -198,6 +209,18 @@ def main() -> int:
                                     person_model = YOLO(args.person_model)
                                 person_anchor.reset()
                                 effect, effect_at = TransformEffect(spec, sprite), now
+                        elif isinstance(spec, DragonSpec):
+                            if args.effect_seconds:
+                                spec = replace(spec, duration=args.effect_seconds)
+                            if args.dragon_length:
+                                spec = replace(spec, length=args.dragon_length)
+                            if args.dragon_angle is not None:
+                                spec = replace(spec, angle=args.dragon_angle)
+                            if pose_model is None:
+                                from ultralytics import YOLO
+                                pose_model = YOLO(args.pose_model)
+                            mouth_anchor.reset()
+                            effect, effect_at = DragonFireEffect(spec), now
                         elif isinstance(spec, CloneSpec):
                             if args.effect_seconds:
                                 spec = replace(spec, duration=args.effect_seconds)
@@ -247,7 +270,24 @@ def main() -> int:
                 if now - effect_at > effect.spec.duration:
                     effect = None
                 else:
-                    if isinstance(effect, CloneEffect):
+                    if isinstance(effect, DragonFireEffect):
+                        # COCO pose gives a nose keypoint; the mouth sits a little below
+                        # it, scaled by the eye separation so it holds at any distance.
+                        pk = pose_model.predict(frame, conf=0.35, verbose=False,
+                                                device=args.device)[0]
+                        mbox = None
+                        if pk.keypoints is not None and len(pk.keypoints):
+                            kp = pk.keypoints.data[0].cpu().numpy()
+                            if kp[0, 2] > 0.4:
+                                gap = float(np.hypot(kp[1, 0] - kp[2, 0],
+                                                     kp[1, 1] - kp[2, 1]))
+                                gap = gap if gap > 4 else frame.shape[1] * 0.05
+                                mx = float(kp[0, 0]) * scale
+                                my = (float(kp[0, 1]) + gap * 0.55) * scale
+                                r = max(8.0, gap * scale)
+                                mbox = (mx - r, my - r, mx + r, my + r)
+                        anchored = mouth_anchor.update(mbox, now)
+                    elif isinstance(effect, CloneEffect):
                         # Re-cut every frame so the clones mirror the caster's movement;
                         # a frozen cutout reads as pasted stills, not clones.
                         sr = segment_model.predict(frame, conf=0.35, classes=[0],
@@ -308,6 +348,7 @@ def main() -> int:
                     cards, jutsu_name, effect = [], None, None
                     anchor.reset()
                     person_anchor.reset()
+                    mouth_anchor.reset()
                     print("  -- reset")
     finally:
         cap.release()

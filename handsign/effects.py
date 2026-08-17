@@ -572,6 +572,189 @@ class CloneEffect:
         blit_rgba(frame, self.cutout, ox, oy, 1.0)
         return frame
 
+# --------------------------------------------------------------------------------------
+# Dragon fire (a serpentine fire dragon breathed from the mouth)
+# --------------------------------------------------------------------------------------
+
+@dataclass
+class DragonSpec:
+    """Shape, colour and timing for the fire dragon."""
+    duration: float = 5.5
+    grow: float = 0.8              # seconds for the dragon to fully emerge
+    fade: float = 0.7
+    length: float = 0.50           # body length as a fraction of frame width
+    thickness: float = 0.135       # max body width as a fraction of frame height
+    angle: float = -0.24           # launch direction from the mouth, radians
+    waves: float = 2.1             # undulation cycles along the body
+    amplitude: float = 0.13        # undulation size as a fraction of length
+    speed: float = 3.4             # undulation animation speed
+    core: tuple[int, int, int] = (205, 255, 255)    # BGR: near-white yellow
+    mid: tuple[int, int, int] = (40, 185, 255)      # orange
+    glow: tuple[int, int, int] = (10, 70, 235)      # deep red-orange
+    segments: int = 46
+
+
+class DragonFireEffect:
+    """A fire dragon breathed from the caster's mouth.
+
+    The dragon is a spine curve rather than a sprite: a straight launch axis with a
+    travelling sine wave across it, thickened into a tapered body and capped with a head.
+    Because the wave phase advances with time the body undulates, and that motion is what
+    separates "a dragon" from "an orange smear" -- a static flame shape reads as neither.
+
+    Fire is drawn in three passes over the same silhouette -- wide and dark, blurred into
+    a glow; mid orange; then a thin near-white core -- composited additively so it behaves
+    like light rather than paint.
+    """
+
+    def __init__(self, spec: DragonSpec, seed: int | None = None):
+        self.spec = spec
+        self.rng = np.random.default_rng(seed)
+
+    def intensity(self, age: float) -> float:
+        s = self.spec
+        if age < 0 or age > s.duration:
+            return 0.0
+        if age > s.duration - s.fade:
+            return max(0.0, (s.duration - age) / s.fade)
+        return 1.0
+
+    def extent(self, age: float) -> float:
+        """How much of the body has emerged, 0..1."""
+        return min(1.0, max(0.0, age) / max(self.spec.grow, 1e-6))
+
+    def spine(self, mouth, frame_size, age, flip=1.0):
+        """Points from the mouth (tail) out to the leading head, with live undulation."""
+        s = self.spec
+        width, height = frame_size
+        length = s.length * width * self.extent(age)
+        amplitude = s.amplitude * s.length * width
+        angle = s.angle
+        ax, ay = math.cos(angle) * flip, math.sin(angle)
+        perp_x, perp_y = -ay, ax
+
+        points = []
+        for i in range(s.segments):
+            t = i / (s.segments - 1)
+            wave = math.sin(t * s.waves * 2 * math.pi - age * s.speed)
+            # The wave is pinned at the mouth and widens along the body, so the dragon
+            # stays anchored to the face instead of sliding out of it sideways.
+            swing = wave * amplitude * (t ** 0.7)
+            points.append((mouth[0] + ax * length * t + perp_x * swing,
+                           mouth[1] + ay * length * t + perp_y * swing))
+        return points
+
+    def _body_polygon(self, points, half_width):
+        """Offset the spine either side by a tapering half-width."""
+        left, right = [], []
+        n = len(points)
+        for i, (x, y) in enumerate(points):
+            t = i / (n - 1)
+            # Thin where it leaves the mouth, thickest around the shoulders, tapering
+            # again just behind the head.
+            width = half_width * math.sin(math.pi * min(1.0, t * 0.90 + 0.035)) ** 0.7
+            if i == 0:
+                dx, dy = points[1][0] - x, points[1][1] - y
+            elif i == n - 1:
+                dx, dy = x - points[-2][0], y - points[-2][1]
+            else:
+                dx = points[i + 1][0] - points[i - 1][0]
+                dy = points[i + 1][1] - points[i - 1][1]
+            norm = math.hypot(dx, dy) or 1.0
+            nx, ny = -dy / norm, dx / norm
+            left.append((x + nx * width, y + ny * width))
+            right.append((x - nx * width, y - ny * width))
+        return np.array(left + right[::-1], dtype=np.int32)
+
+    def _head(self, layer, points, radius, colour):
+        head = points[-1]
+        neck = points[-4] if len(points) > 4 else points[0]
+        dx, dy = head[0] - neck[0], head[1] - neck[1]
+        norm = math.hypot(dx, dy) or 1.0
+        fx, fy = dx / norm, dy / norm
+
+        cv2.circle(layer, (int(head[0]), int(head[1])), max(2, int(radius)),
+                   colour, -1, cv2.LINE_AA)
+        # A wedge forward of the skull: this is what makes the tip read as a head rather
+        # than a bead on the end of a rope.
+        snout = np.array([
+            (head[0] + fx * radius * 2.4, head[1] + fy * radius * 2.4),
+            (head[0] - fy * radius * 0.75, head[1] + fx * radius * 0.75),
+            (head[0] + fy * radius * 0.75, head[1] - fx * radius * 0.75),
+        ], dtype=np.int32)
+        cv2.fillPoly(layer, [snout], colour, cv2.LINE_AA)
+        for side in (-1.0, 1.0):
+            tip = (int(head[0] - fx * radius * 1.9 - fy * side * radius * 1.7),
+                   int(head[1] - fy * radius * 1.9 + fx * side * radius * 1.7))
+            cv2.line(layer, (int(head[0]), int(head[1])), tip,
+                     colour, max(1, int(radius * 0.30)), cv2.LINE_AA)
+        # A jaw gap and two eyes. Without them the head is a bright lump; these are the
+        # cheapest marks that make a viewer read "creature".
+        jaw = np.array([
+            (head[0] + fx * radius * 2.3, head[1] + fy * radius * 2.3),
+            (head[0] + fx * radius * 0.7 - fy * radius * 0.5,
+             head[1] + fy * radius * 0.7 + fx * radius * 0.5),
+            (head[0] + fx * radius * 0.9, head[1] + fy * radius * 0.9),
+        ], dtype=np.int32)
+        cv2.fillPoly(layer, [jaw], (0, 0, 0), cv2.LINE_AA)
+        for side in (-1.0, 1.0):
+            eye = (int(head[0] + fx * radius * 0.25 - fy * side * radius * 0.5),
+                   int(head[1] + fy * radius * 0.25 + fx * side * radius * 0.5))
+            cv2.circle(layer, eye, max(1, int(radius * 0.16)), (255, 255, 255), -1, cv2.LINE_AA)
+
+    def draw(self, frame, centre, radius, age):
+        """`centre` is the mouth. `radius` is unused -- size comes from the frame."""
+        level = self.intensity(age)
+        if level <= 0.01 or self.extent(age) <= 0.02:
+            return frame
+
+        s = self.spec
+        height, width = frame.shape[:2]
+        # Launch away from whichever side the caster is on, so the dragon flies into open
+        # picture rather than straight off the nearest edge.
+        flip = 1.0 if centre[0] < width * 0.55 else -1.0
+        # Start just clear of the lips so the body does not sit on top of the face.
+        lead = s.thickness * height * 0.5
+        origin = (centre[0] + math.cos(s.angle) * flip * lead,
+                  centre[1] + math.sin(s.angle) * lead)
+        points = self.spine(origin, (width, height), age, flip)
+
+        # Turbulence: a clean ribbon reads as plastic, not fire.
+        jitter = s.thickness * height * 0.16
+        points = [(x + self.rng.uniform(-jitter, jitter),
+                   y + self.rng.uniform(-jitter, jitter)) for x, y in points]
+
+        base_half = s.thickness * height / 2
+        layer = np.zeros_like(frame)
+        # Weights matter as much as colours: three passes at full brightness add up to
+        # white, which is why an unweighted stack looks like a pale smear rather than fire.
+        for colour, scale, blur, weight in (
+            (s.glow, 1.30, s.thickness * height * 0.22, 0.50),
+            (s.mid, 1.00, s.thickness * height * 0.07, 1.00),
+            (s.core, 0.26, 0.0, 0.75),
+        ):
+            tinted = tuple(int(c * level * weight) for c in colour)
+            pass_layer = np.zeros_like(frame)
+            cv2.fillPoly(pass_layer, [self._body_polygon(points, base_half * scale)],
+                         tinted, cv2.LINE_AA)
+            self._head(pass_layer, points, base_half * 2.35 * scale, tinted)
+            if blur > 0.5:
+                pass_layer = cv2.GaussianBlur(pass_layer, (0, 0), blur)
+            layer = cv2.add(layer, pass_layer)
+
+        # Embers licking off the body.
+        for _ in range(14):
+            i = int(self.rng.uniform(0.15, 1.0) * (len(points) - 1))
+            x, y = points[i]
+            angle = self.rng.uniform(0, 2 * math.pi)
+            reach = self.rng.uniform(0.4, 1.5) * s.thickness * height
+            cv2.line(layer, (int(x), int(y)),
+                     (int(x + math.cos(angle) * reach), int(y + math.sin(angle) * reach)),
+                     tuple(int(c * level) for c in s.mid), 2, cv2.LINE_AA)
+
+        frame[:] = cv2.add(frame, layer)
+        return frame
+
 
 # --------------------------------------------------------------------------------------
 # Registry -- last in the file so every spec class above is already defined.
@@ -579,9 +762,11 @@ class CloneEffect:
 
 TRANSFORMATION = TransformSpec(duration=6.0, smoke_s=0.55, scale=1.3)
 CLONE = CloneSpec(duration=6.0, count=6)
+DRAGON_FIRE = DragonSpec()
 
 EFFECTS.update({
     "Chidori": CHIDORI,
     "Transformation Jutsu": TRANSFORMATION,
     "Clone Jutsu": CLONE,
+    "Dragon Fire Jutsu": DRAGON_FIRE,
 })
