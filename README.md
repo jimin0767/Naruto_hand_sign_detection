@@ -22,15 +22,39 @@ python 04_demo.py
 `q` or `Esc` quits, `r` resets the sign sequence. Useful flags:
 
 ```bash
-python 04_demo.py --source 1              # a different camera
-python 04_demo.py --source clip.mp4       # a video file
-python 04_demo.py --accept-conf 0.75      # stricter; fewer false positives
-python 04_demo.py --record out.mp4        # save the session
+python 04_demo.py --source 1                    # a different camera
+python 04_demo.py --source clip.mp4             # a video file
+python 04_demo.py --jutsu demo-short.csv        # 7 short jutsu, easier to present
+python 04_demo.py --accept-conf 0.75            # stricter; fewer false positives
+python 04_demo.py --record out.mp4              # save the session
 ```
 
 Weights are **not** in this repo — download `best.pt` (and `best.onnx`) from the
 [Releases](../../releases) page and place them at
 `runs/handsign/yolo11m_disjoint/weights/`.
+
+### Reading the screen
+
+| element | meaning |
+|---|---|
+| **Green corner brackets** | a detection that counts toward a sign |
+| **Grey brackets, "ignored"** | detected but below `--accept-conf`, so it does not vote |
+| **Panel, top left** | the sign currently being held, with a bar showing how close it is to committing |
+| **Ring, top right** | countdown to sequence reset. Appears **only after you release a sign** — holding one steady never expires it |
+| **Card strip, bottom** | signs recognised so far: kanji above, English below. The same sign twice in a row does not stack |
+| **Orange banner** | a completed jutsu; it replaces the card strip for a few seconds |
+
+**If a sign will not commit,** watch the brackets and the stability bar. Grey brackets mean
+the model sees the sign but is not confident enough to count it — the bar stalls partway
+and nothing registers. Lower the gate for that sign rather than assuming the model is
+blind to it:
+
+```bash
+python 04_demo.py --accept-conf 0.50
+```
+
+Confidence varies by class and by person. During testing `ox` swung between 0.31 and 0.82
+on the same held pose, which was enough to stall it at the default 0.60.
 
 ## Using it from Python
 
@@ -47,11 +71,15 @@ voting = detection.name if detection and detection.confidence >= 0.60 else None
 if (sign := smoother.update(voting)):
     if (jutsu := tracker.add(sign, time.time())):
         print("cast", jutsu.name)
-tracker.tick(time.time())
+tracker.tick(time.time(), holding=smoother.held is not None)
 ```
 
+Pass `holding` to `tick` so the reset countdown pauses while a sign is being held —
+otherwise a long hold silently wipes the sequence mid-cast.
+
 `handsign.smoothing` has no torch or ultralytics dependency, so it can be driven from any
-inference backend — or ported to another language.
+inference backend — or ported to another language. `handsign.ui` is the demo's rendering
+layer and is not needed to consume the model.
 
 ## The 12 classes
 
@@ -70,7 +98,11 @@ Clone and Water Shark Bullet are therefore not representable.
 
 ## Jutsu
 
-`jutsu.csv` holds 19 sequences, in the reference project's column layout but in English:
+Two tables ship. `jutsu.csv` holds all 19 sequences; `demo-short.csv` is a curated seven
+— one per element plus the two general techniques, none longer than four signs — which is
+easier to perform live. Pick one with `--jutsu`.
+
+Both use the reference project's column layout, in English:
 
 ```
 element,jutsu,sign1,sign2,...
@@ -115,7 +147,7 @@ Each stage prints what it did and refuses to proceed on bad input. `01` aborts o
 unrecognised class name rather than guessing; `02` refuses to write a split that leaks.
 
 ```bash
-python -m pytest tests/ -q     # 186 tests
+python -m pytest tests/ -q     # 253 tests
 ```
 
 ## How the dataset was built

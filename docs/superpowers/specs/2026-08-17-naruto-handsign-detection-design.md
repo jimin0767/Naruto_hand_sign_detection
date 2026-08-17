@@ -404,7 +404,9 @@ this is a live risk.
 03_train.py           YOLO11m training + held-out reporting     [done]
 04_demo.py            webcam demo, smoothing, jutsu matching    [done]
 jutsu.csv             19 jutsu sequences, editable
-tests/                155 tests
+demo-short.csv        7 short sequences, for presenting
+handsign/             reusable package (classes, detector, smoothing, ui)
+tests/                253 tests
 docs/                 this spec, confusion matrix, demo clip
 ```
 
