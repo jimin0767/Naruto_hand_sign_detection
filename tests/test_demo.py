@@ -1,8 +1,8 @@
-"""Tests for the demo's smoothing and sequence logic.
+"""Tests for the smoothing and sequence logic behind the demo.
 
-Both run without a camera, which is the point of keeping them separate from the capture
-loop. The behaviours tested here are the ones that decide whether the demo feels solid or
-twitchy on stage.
+These live in the `handsign` package rather than the demo script so they can run without
+a camera -- and so a game can reuse them. The behaviours tested here are the ones that
+decide whether the demo feels solid or twitchy on stage.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ def _load(name: str, filename: str):
     return module
 
 
-demo = _load("demo_app", "04_demo.py")
+import handsign as demo   # noqa: E402  the logic now lives in the package
 
 
 def feed(smoother, predictions):
@@ -95,7 +95,7 @@ class TestSignSmoother:
 
     def test_unreachable_threshold_is_rejected(self):
         """min_votes > window would silently never confirm anything."""
-        with pytest.raises(demo.DemoError, match="cannot exceed"):
+        with pytest.raises(demo.HandSignError, match="cannot exceed"):
             demo.SignSmoother(window=5, min_votes=9)
 
     def test_contested_window_confirms_nothing(self):
@@ -137,9 +137,11 @@ class TestSequenceTracker:
         assert t.add("hare", 0.1) is None
 
     def test_timeout_clears_a_partial_sequence(self):
+        """The clock starts on the first idle tick, not when the sign was added."""
         t = make_tracker(timeout_s=4.0)
         t.add("tiger", 0.0)
-        t.tick(5.0)
+        t.tick(1.0)              # hands released; countdown begins here
+        t.tick(6.0)
         assert t.buffer == []
 
     def test_timeout_does_not_clear_a_fresh_sequence(self):
@@ -151,8 +153,56 @@ class TestSequenceTracker:
     def test_sequence_broken_by_timeout_does_not_match(self):
         t = make_tracker(timeout_s=4.0)
         t.add("tiger", 0.0)
+        t.tick(1.0)
         t.tick(9.0)
         assert t.add("snake", 10.0) is None
+
+    def test_holding_a_sign_suspends_the_countdown(self):
+        """Holding one sign for a minute must not wipe the sequence."""
+        t = make_tracker(timeout_s=3.0)
+        t.add("tiger", 0.0)
+        for tick in range(1, 60):
+            t.tick(float(tick), holding=True)
+        assert t.buffer == ["tiger"]
+
+    def test_countdown_restarts_after_a_hold(self):
+        t = make_tracker(timeout_s=3.0)
+        t.add("tiger", 0.0)
+        t.tick(10.0, holding=True)      # still holding: no clock
+        t.tick(11.0)                    # released: clock starts now
+        t.tick(13.0)
+        assert t.buffer == ["tiger"]    # only 2s idle
+        t.tick(15.0)
+        assert t.buffer == []
+
+    def test_time_left_is_none_while_holding(self):
+        t = make_tracker(timeout_s=3.0)
+        t.add("tiger", 0.0)
+        t.tick(1.0, holding=True)
+        assert t.time_left(1.0) is None
+
+    def test_time_left_is_none_with_an_empty_buffer(self):
+        assert make_tracker().time_left(5.0) is None
+
+    def test_time_left_counts_down(self):
+        t = make_tracker(timeout_s=3.0)
+        t.add("tiger", 0.0)
+        t.tick(1.0)
+        assert t.time_left(1.0) == pytest.approx(3.0)
+        assert t.time_left(2.5) == pytest.approx(1.5)
+
+    def test_time_left_floors_at_zero(self):
+        t = make_tracker(timeout_s=3.0)
+        t.add("tiger", 0.0)
+        t.tick(1.0)
+        assert t.time_left(99.0) == 0.0
+
+    def test_adding_a_sign_cancels_the_countdown(self):
+        t = make_tracker(timeout_s=3.0)
+        t.add("tiger", 0.0)
+        t.tick(1.0)
+        t.add("ox", 2.0)
+        assert t.idle_since is None and t.time_left(2.0) is None
 
     def test_buffer_is_bounded(self):
         t = make_tracker(max_length=4)
@@ -201,23 +251,23 @@ class TestLoadJutsu:
         """Gassho is real but untrained here; a jutsu using it could never fire."""
         p = tmp_path / "j.yaml"
         p.write_text("jutsu:\n  - name: X\n    signs: [tiger, gassho]\n")
-        with pytest.raises(demo.DemoError, match="gassho"):
+        with pytest.raises(demo.HandSignError, match="gassho"):
             demo.load_jutsu(p)
 
     def test_rejects_an_empty_sign_list(self, tmp_path):
         p = tmp_path / "j.yaml"
         p.write_text("jutsu:\n  - name: X\n    signs: []\n")
-        with pytest.raises(demo.DemoError, match="no signs"):
+        with pytest.raises(demo.HandSignError, match="no signs"):
             demo.load_jutsu(p)
 
     def test_rejects_a_file_with_no_jutsu(self, tmp_path):
         p = tmp_path / "j.yaml"
         p.write_text("jutsu: []\n")
-        with pytest.raises(demo.DemoError, match="no jutsu"):
+        with pytest.raises(demo.HandSignError, match="no jutsu"):
             demo.load_jutsu(p)
 
     def test_missing_file_raises(self, tmp_path):
-        with pytest.raises(demo.DemoError, match="not found"):
+        with pytest.raises(demo.HandSignError, match="not found"):
             demo.load_jutsu(tmp_path / "nope.yaml")
 
     def test_sign_names_are_normalised(self, tmp_path):

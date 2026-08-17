@@ -99,12 +99,13 @@ class SequenceTracker:
     """Accumulate confirmed signs and report when the tail matches a known jutsu."""
 
     jutsu: list[Jutsu]
-    timeout_s: float = 4.0
+    timeout_s: float = 3.0
     max_length: int = 16
     buffer: list[str] = field(default_factory=list)
     last_sign_at: float = 0.0
     matched: Jutsu | None = None
     matched_at: float = 0.0
+    idle_since: float | None = None
 
     def __post_init__(self) -> None:
         # Longest first, so a 6-sign jutsu wins over a 3-sign one sharing its ending.
@@ -114,6 +115,7 @@ class SequenceTracker:
         self.buffer.append(sign)
         del self.buffer[: max(0, len(self.buffer) - self.max_length)]
         self.last_sign_at = now
+        self.idle_since = None
 
         for candidate in self.jutsu:
             n = len(candidate.signs)
@@ -124,10 +126,27 @@ class SequenceTracker:
                 return candidate
         return None
 
-    def tick(self, now: float) -> None:
-        """Expire a stale partial sequence. Call once per frame."""
-        if self.buffer and now - self.last_sign_at > self.timeout_s:
+    def tick(self, now: float, holding: bool = False) -> None:
+        """Expire a stale partial sequence. Call once per frame.
+
+        The countdown runs only while **no sign is held**. Holding one sign steady for
+        longer than the timeout must not wipe the sequence -- the clock is measuring
+        "have you stopped casting", not "how long since the last sign".
+        """
+        if holding or not self.buffer:
+            self.idle_since = None
+            return
+        if self.idle_since is None:
+            self.idle_since = now
+        elif now - self.idle_since > self.timeout_s:
             self.buffer.clear()
+            self.idle_since = None
+
+    def time_left(self, now: float) -> float | None:
+        """Seconds until the sequence expires, or None when the clock is not running."""
+        if self.idle_since is None or not self.buffer:
+            return None
+        return max(0.0, self.timeout_s - (now - self.idle_since))
 
     def banner(self, now: float, hold_s: float = 3.0) -> Jutsu | None:
         """The jutsu to display right now, or None once its moment has passed."""

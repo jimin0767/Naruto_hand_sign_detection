@@ -36,4 +36,22 @@ ROMAJI: dict[str, str] = {
     "ram": "Hitsuji", "rat": "Ne", "snake": "Mi", "tiger": "Tora",
 }
 
+# Zodiac kanji, for display. Rendering these needs a CJK font -- OpenCV's putText
+# cannot draw them, so the UI pre-renders each glyph once with PIL.
+KANJI: dict[str, str] = {
+    "bird": "酉",    # tori
+    "boar": "亥",    # i
+    "dog": "戌",     # inu
+    "dragon": "辰",  # tatsu
+    "hare": "卯",    # u
+    "horse": "午",   # uma
+    "monkey": "申",  # saru
+    "ox": "丑",      # ushi
+    "ram": "未",     # hitsuji
+    "rat": "子",     # ne
+    "snake": "巳",   # mi
+    "tiger": "寅",   # tora
+}
+
 assert len(CANONICAL) == len(set(CANONICAL)) == 12
+assert set(KANJI) == set(ROMAJI) == set(CANONICAL)
