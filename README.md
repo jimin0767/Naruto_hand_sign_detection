@@ -172,24 +172,29 @@ it sits on the frame edge, but a shrunk and lifted clone drags that line into op
 where it reads as a pasted rectangle, so the bottom of every cutout is dissolved into a
 gradient.
 
-**Dragon Fire Jutsu** breathes a fire dragon from your mouth, located from the COCO pose
-model's nose keypoint (the mouth sits just below it, offset by your eye separation so it
-holds at any distance).
+**Dragon Fire Jutsu** breathes a roaring dragon head from your mouth, and **aims it where
+you are looking** — face the camera and it goes straight out, turn your head and it follows.
 
-The dragon is a spine curve, not a sprite: a launch axis with a travelling sine wave across
-it, thickened into a tapered body and capped with a horned head. The wave phase advances
-with time, and that motion is what separates "a dragon" from "an orange smear" — a static
-flame shape reads as neither. Fire is three passes over the same silhouette — wide and dark
-blurred into a glow, mid orange, then a thin near-white core — composited additively so it
-behaves like light. The three passes are *weighted*: at equal brightness they add up to
-white, which looks like a pale smear rather than fire.
+The mouth comes from the COCO pose model's nose keypoint, offset downward by your eye
+separation so it holds at any distance. Yaw comes from where the nose sits *between* the
+eyes: centred means facing the camera, and as you turn it slides toward the near eye while
+the eyes crowd together. Ear visibility disambiguates a strong turn, where one ear
+disappears entirely.
+
+The head is a set of polygons — skull, hinged lower jaw, teeth, eye, swept horns, and a
+ragged flame mane regenerated every frame — defined once in local coordinates and then
+rotated, scaled and mirrored into place. Fire is three weighted passes over the same
+silhouette, composited additively.
 
 Tune it to your framing without editing code:
 
 ```bash
-python 04_demo.py --dragon-angle -0.35     # aim higher over your shoulder
-python 04_demo.py --dragon-length 0.65     # longer body
+python 04_demo.py --dragon-size 0.24      # bigger head
+python 04_demo.py --dragon-reach 0.30     # further from your face
 ```
+
+Note it washes out against a very bright background — additive light on a near-white wall
+saturates. A darker backdrop makes it read much more strongly.
 
 Add more in `handsign/effects.py` — `EFFECTS` maps a jutsu name to an `EffectSpec`
 (procedural), `TransformSpec` (sprite), `CloneSpec` (segmentation), or `DragonSpec`. A name

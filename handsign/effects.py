@@ -573,43 +573,113 @@ class CloneEffect:
         return frame
 
 # --------------------------------------------------------------------------------------
-# Dragon fire (a serpentine fire dragon breathed from the mouth)
+# Dragon fire (a roaring fire dragon head breathed from the mouth)
 # --------------------------------------------------------------------------------------
 
 @dataclass
 class DragonSpec:
-    """Shape, colour and timing for the fire dragon."""
-    duration: float = 5.5
-    grow: float = 0.8              # seconds for the dragon to fully emerge
-    fade: float = 0.7
-    length: float = 0.50           # body length as a fraction of frame width
-    thickness: float = 0.135       # max body width as a fraction of frame height
-    angle: float = -0.24           # launch direction from the mouth, radians
-    waves: float = 2.1             # undulation cycles along the body
-    amplitude: float = 0.13        # undulation size as a fraction of length
-    speed: float = 3.4             # undulation animation speed
-    core: tuple[int, int, int] = (205, 255, 255)    # BGR: near-white yellow
-    mid: tuple[int, int, int] = (40, 185, 255)      # orange
-    glow: tuple[int, int, int] = (10, 70, 235)      # deep red-orange
-    segments: int = 46
+    """Shape, colour and timing for the fire dragon head."""
+    duration: float = 5.0
+    grow: float = 0.45             # seconds for the head to rush out to full size
+    fade: float = 0.6
+    # Local head geometry spans about 2.45 units across (skull + horns + mane), so this
+    # is scaled by that, not by 1. Getting it wrong produced a head twice the frame wide.
+    size: float = 0.19             # head extent as a fraction of frame width
+    reach: float = 0.24            # distance from the mouth, as a fraction of frame width
+    yaw_swing: float = 0.34        # radians of tilt at full head-yaw; the left/right
+                                   # aiming is the mirror, this is only the lean
+    jaw: float = 0.42              # jaw opening, radians
+    mane: int = 15                 # flame tongues around the skull
+    core: tuple[int, int, int] = (150, 245, 255)    # BGR: yellow-white
+    mid: tuple[int, int, int] = (30, 150, 255)      # orange
+    glow: tuple[int, int, int] = (10, 60, 200)      # deep red-orange
+
+
+def estimate_yaw(keypoints) -> float | None:
+    """Head yaw in [-1, 1] from COCO pose keypoints: -1 full left, 0 facing camera, +1 right.
+
+    Uses where the nose sits between the eyes. Facing the camera the nose is centred
+    between them; as the head turns it slides toward the near eye and the eyes crowd
+    together. Ear visibility disambiguates a strong turn, where one ear disappears.
+
+    `keypoints` is the COCO 17x3 array: 0 nose, 1 left eye, 2 right eye, 3 left ear,
+    4 right ear.
+    """
+    nose, left_eye, right_eye = keypoints[0], keypoints[1], keypoints[2]
+    if nose[2] < 0.3 or left_eye[2] < 0.3 or right_eye[2] < 0.3:
+        return None
+
+    centre_x = (left_eye[0] + right_eye[0]) / 2
+    span = abs(left_eye[0] - right_eye[0])
+    if span < 3:
+        return None
+    # Normalised by half the eye span, so it is scale invariant.
+    yaw = float((nose[0] - centre_x) / (span / 2))
+
+    left_ear, right_ear = keypoints[3], keypoints[4]
+    if left_ear[2] < 0.3 <= right_ear[2]:
+        yaw = max(yaw, 0.35)
+    elif right_ear[2] < 0.3 <= left_ear[2]:
+        yaw = min(yaw, -0.35)
+    return max(-1.0, min(1.0, yaw))
+
+
+# Dragon head in local coordinates: snout along +x, size 1.0 from hinge to nose tip,
+# +y downward. Everything is defined once here and then rotated, scaled and translated,
+# which keeps the drawing code free of trigonometry.
+_SKULL = [
+    (-0.42, -0.30), (-0.22, -0.52), (0.16, -0.55), (0.52, -0.46),
+    (0.86, -0.30), (1.02, -0.12), (0.98, 0.02), (0.60, 0.06),
+    (0.10, 0.10), (-0.34, 0.06),
+]
+_LOWER_JAW = [
+    (-0.30, 0.10), (0.12, 0.22), (0.56, 0.34), (0.86, 0.46),
+    (0.80, 0.58), (0.44, 0.52), (0.02, 0.38), (-0.32, 0.24),
+]
+_UPPER_TEETH = [(0.86, 0.02), (0.62, 0.02), (0.38, 0.04), (0.16, 0.07)]
+_LOWER_TEETH = [(0.78, 0.42), (0.54, 0.32), (0.30, 0.24), (0.08, 0.18)]
+_HORNS = [
+    ((-0.10, -0.50), (-0.78, -0.86)),
+    ((0.22, -0.54), (-0.34, -1.02)),
+    ((-0.30, -0.34), (-0.98, -0.48)),
+]
+_EYE = (0.46, -0.26)
+
+
+def _place(points, origin, angle, scale, flip):
+    """Rotate/scale/translate local head coordinates into frame pixels."""
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    out = []
+    for x, y in points:
+        x = x * flip
+        out.append((origin[0] + (x * cos_a - y * sin_a) * scale,
+                    origin[1] + (x * sin_a + y * cos_a) * scale))
+    return out
 
 
 class DragonFireEffect:
-    """A fire dragon breathed from the caster's mouth.
+    """A roaring dragon head made of fire, breathed from the caster's mouth.
 
-    The dragon is a spine curve rather than a sprite: a straight launch axis with a
-    travelling sine wave across it, thickened into a tapered body and capped with a head.
-    Because the wave phase advances with time the body undulates, and that motion is what
-    separates "a dragon" from "an orange smear" -- a static flame shape reads as neither.
+    Built as a head rather than a long body: the source material's dragon reads as a
+    huge open-jawed skull wreathed in flame, and a serpentine ribbon -- the obvious
+    procedural shape -- does not resemble it at any length.
 
-    Fire is drawn in three passes over the same silhouette -- wide and dark, blurred into
-    a glow; mid orange; then a thin near-white core -- composited additively so it behaves
-    like light rather than paint.
+    The head is defined once in local coordinates and then rotated to follow the caster's
+    head yaw, so looking straight at the camera sends the dragon straight out and turning
+    aims it where the caster is facing.
     """
 
     def __init__(self, spec: DragonSpec, seed: int | None = None):
         self.spec = spec
         self.rng = np.random.default_rng(seed)
+        self.yaw = 0.0
+
+    def set_yaw(self, yaw: float | None) -> None:
+        """Called per frame with the caster's head yaw; None keeps the previous value."""
+        if yaw is not None:
+            # Ease toward the new yaw: raw pose yaw is jittery and a snapping dragon
+            # looks broken rather than responsive.
+            self.yaw += (yaw - self.yaw) * 0.35
 
     def intensity(self, age: float) -> float:
         s = self.spec
@@ -620,89 +690,51 @@ class DragonFireEffect:
         return 1.0
 
     def extent(self, age: float) -> float:
-        """How much of the body has emerged, 0..1."""
-        return min(1.0, max(0.0, age) / max(self.spec.grow, 1e-6))
+        """0..1 as the head rushes out from the mouth."""
+        t = min(1.0, max(0.0, age) / max(self.spec.grow, 1e-6))
+        return t * t * (3 - 2 * t)        # smoothstep
 
-    def spine(self, mouth, frame_size, age, flip=1.0):
-        """Points from the mouth (tail) out to the leading head, with live undulation."""
+    def head_pose(self, mouth, frame_size, age):
+        """Where the head sits, how big, and which way it points."""
         s = self.spec
-        width, height = frame_size
-        length = s.length * width * self.extent(age)
-        amplitude = s.amplitude * s.length * width
-        angle = s.angle
-        ax, ay = math.cos(angle) * flip, math.sin(angle)
-        perp_x, perp_y = -ay, ax
+        width, _ = frame_size
+        grow = self.extent(age)
+        angle = self.yaw * s.yaw_swing
+        scale = s.size * width * (0.35 + 0.65 * grow)
+        reach = s.reach * width * grow
+        origin = (mouth[0] + math.cos(angle) * reach * (1 if self.yaw >= 0 else -1),
+                  mouth[1] + math.sin(abs(angle)) * reach * 0.35 + scale * 0.34)
+        return origin, angle, scale
 
-        points = []
-        for i in range(s.segments):
-            t = i / (s.segments - 1)
-            wave = math.sin(t * s.waves * 2 * math.pi - age * s.speed)
-            # The wave is pinned at the mouth and widens along the body, so the dragon
-            # stays anchored to the face instead of sliding out of it sideways.
-            swing = wave * amplitude * (t ** 0.7)
-            points.append((mouth[0] + ax * length * t + perp_x * swing,
-                           mouth[1] + ay * length * t + perp_y * swing))
-        return points
+    def _silhouette(self, layer, origin, angle, scale, flip, colour, jaw_drop, bloat):
+        s = self.spec
+        skull = _place([(x, y * bloat) for x, y in _SKULL], origin, angle, scale, flip)
+        cv2.fillPoly(layer, [np.array(skull, np.int32)], colour, cv2.LINE_AA)
 
-    def _body_polygon(self, points, half_width):
-        """Offset the spine either side by a tapering half-width."""
-        left, right = [], []
-        n = len(points)
-        for i, (x, y) in enumerate(points):
-            t = i / (n - 1)
-            # Thin where it leaves the mouth, thickest around the shoulders, tapering
-            # again just behind the head.
-            width = half_width * math.sin(math.pi * min(1.0, t * 0.90 + 0.035)) ** 0.7
-            if i == 0:
-                dx, dy = points[1][0] - x, points[1][1] - y
-            elif i == n - 1:
-                dx, dy = x - points[-2][0], y - points[-2][1]
-            else:
-                dx = points[i + 1][0] - points[i - 1][0]
-                dy = points[i + 1][1] - points[i - 1][1]
-            norm = math.hypot(dx, dy) or 1.0
-            nx, ny = -dy / norm, dx / norm
-            left.append((x + nx * width, y + ny * width))
-            right.append((x - nx * width, y - ny * width))
-        return np.array(left + right[::-1], dtype=np.int32)
+        jaw_local = _place(_LOWER_JAW, (0.0, 0.0), jaw_drop, 1.0, 1.0)
+        jaw = _place([(x, y * bloat) for x, y in jaw_local], origin, angle, scale, flip)
+        cv2.fillPoly(layer, [np.array(jaw, np.int32)], colour, cv2.LINE_AA)
 
-    def _head(self, layer, points, radius, colour):
-        head = points[-1]
-        neck = points[-4] if len(points) > 4 else points[0]
-        dx, dy = head[0] - neck[0], head[1] - neck[1]
-        norm = math.hypot(dx, dy) or 1.0
-        fx, fy = dx / norm, dy / norm
+        for base, tip in _HORNS:
+            a, b = _place([base, tip], origin, angle, scale, flip)
+            cv2.line(layer, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
+                     colour, max(2, int(scale * 0.055 * bloat)), cv2.LINE_AA)
 
-        cv2.circle(layer, (int(head[0]), int(head[1])), max(2, int(radius)),
-                   colour, -1, cv2.LINE_AA)
-        # A wedge forward of the skull: this is what makes the tip read as a head rather
-        # than a bead on the end of a rope.
-        snout = np.array([
-            (head[0] + fx * radius * 2.4, head[1] + fy * radius * 2.4),
-            (head[0] - fy * radius * 0.75, head[1] + fx * radius * 0.75),
-            (head[0] + fy * radius * 0.75, head[1] - fx * radius * 0.75),
-        ], dtype=np.int32)
-        cv2.fillPoly(layer, [snout], colour, cv2.LINE_AA)
-        for side in (-1.0, 1.0):
-            tip = (int(head[0] - fx * radius * 1.9 - fy * side * radius * 1.7),
-                   int(head[1] - fy * radius * 1.9 + fx * side * radius * 1.7))
-            cv2.line(layer, (int(head[0]), int(head[1])), tip,
-                     colour, max(1, int(radius * 0.30)), cv2.LINE_AA)
-        # A jaw gap and two eyes. Without them the head is a bright lump; these are the
-        # cheapest marks that make a viewer read "creature".
-        jaw = np.array([
-            (head[0] + fx * radius * 2.3, head[1] + fy * radius * 2.3),
-            (head[0] + fx * radius * 0.7 - fy * radius * 0.5,
-             head[1] + fy * radius * 0.7 + fx * radius * 0.5),
-            (head[0] + fx * radius * 0.9, head[1] + fy * radius * 0.9),
-        ], dtype=np.int32)
-        cv2.fillPoly(layer, [jaw], (0, 0, 0), cv2.LINE_AA)
-        for side in (-1.0, 1.0):
-            eye = (int(head[0] + fx * radius * 0.25 - fy * side * radius * 0.5),
-                   int(head[1] + fy * radius * 0.25 + fx * side * radius * 0.5))
-            cv2.circle(layer, eye, max(1, int(radius * 0.16)), (255, 255, 255), -1, cv2.LINE_AA)
+        # Mane: ragged flame tongues off the back of the skull, regenerated every frame.
+        for i in range(s.mane):
+            t = i / max(s.mane - 1, 1)
+            base_local = (-0.42 + 0.9 * t, -0.52 - 0.10 * math.sin(t * math.pi))
+            direction = -2.3 + t * 2.0 + self.rng.uniform(-0.4, 0.4)
+            length = self.rng.uniform(0.24, 0.58)
+            tip_local = (base_local[0] + math.cos(direction) * length,
+                         base_local[1] + math.sin(direction) * length)
+            a, b = _place([base_local, tip_local], origin, angle, scale, flip)
+            path = jagged_path(self.rng, a, b, scale * 0.05)
+            cv2.polylines(layer, [np.array(path, np.int32)], False, colour,
+                          max(2, int(scale * 0.045 * bloat)), cv2.LINE_AA)
 
-    def draw(self, frame, centre, radius, age):
+    def draw(self, frame: np.ndarray, centre: tuple[float, float],
+             radius: float, age: float) -> np.ndarray:
         """`centre` is the mouth. `radius` is unused -- size comes from the frame."""
         level = self.intensity(age)
         if level <= 0.01 or self.extent(age) <= 0.02:
@@ -710,47 +742,42 @@ class DragonFireEffect:
 
         s = self.spec
         height, width = frame.shape[:2]
-        # Launch away from whichever side the caster is on, so the dragon flies into open
-        # picture rather than straight off the nearest edge.
-        flip = 1.0 if centre[0] < width * 0.55 else -1.0
-        # Start just clear of the lips so the body does not sit on top of the face.
-        lead = s.thickness * height * 0.5
-        origin = (centre[0] + math.cos(s.angle) * flip * lead,
-                  centre[1] + math.sin(s.angle) * lead)
-        points = self.spine(origin, (width, height), age, flip)
+        # Mirror the head so its snout leads away from the caster rather than into them.
+        flip = 1.0 if self.yaw >= 0 else -1.0
+        origin, angle, scale = self.head_pose(centre, (width, height), age)
+        jaw_drop = s.jaw * (0.35 + 0.65 * self.extent(age))
 
-        # Turbulence: a clean ribbon reads as plastic, not fire.
-        jitter = s.thickness * height * 0.16
-        points = [(x + self.rng.uniform(-jitter, jitter),
-                   y + self.rng.uniform(-jitter, jitter)) for x, y in points]
-
-        base_half = s.thickness * height / 2
         layer = np.zeros_like(frame)
-        # Weights matter as much as colours: three passes at full brightness add up to
-        # white, which is why an unweighted stack looks like a pale smear rather than fire.
-        for colour, scale, blur, weight in (
-            (s.glow, 1.30, s.thickness * height * 0.22, 0.50),
-            (s.mid, 1.00, s.thickness * height * 0.07, 1.00),
-            (s.core, 0.26, 0.0, 0.75),
+        for colour, bloat, blur, weight in (
+            (s.glow, 1.22, scale * 0.10, 0.40),
+            (s.mid, 1.04, scale * 0.03, 0.85),
+            (s.core, 0.78, 0.0, 0.42),
         ):
             tinted = tuple(int(c * level * weight) for c in colour)
             pass_layer = np.zeros_like(frame)
-            cv2.fillPoly(pass_layer, [self._body_polygon(points, base_half * scale)],
-                         tinted, cv2.LINE_AA)
-            self._head(pass_layer, points, base_half * 2.35 * scale, tinted)
+            self._silhouette(pass_layer, origin, angle, scale, flip, tinted,
+                             jaw_drop, bloat)
             if blur > 0.5:
                 pass_layer = cv2.GaussianBlur(pass_layer, (0, 0), blur)
             layer = cv2.add(layer, pass_layer)
 
-        # Embers licking off the body.
-        for _ in range(14):
-            i = int(self.rng.uniform(0.15, 1.0) * (len(points) - 1))
-            x, y = points[i]
-            angle = self.rng.uniform(0, 2 * math.pi)
-            reach = self.rng.uniform(0.4, 1.5) * s.thickness * height
-            cv2.line(layer, (int(x), int(y)),
-                     (int(x + math.cos(angle) * reach), int(y + math.sin(angle) * reach)),
-                     tuple(int(c * level) for c in s.mid), 2, cv2.LINE_AA)
+        # Teeth and the eye go on last, in near-white, so they survive the glow passes.
+        hot = tuple(int(c * level) for c in (255, 255, 255))
+        for (tx, ty), depth in zip(_UPPER_TEETH, (0.10, 0.12, 0.11, 0.09)):
+            tri = _place([(tx, ty), (tx - 0.06, ty), (tx - 0.03, ty + depth)],
+                         origin, angle, scale, flip)
+            cv2.fillPoly(layer, [np.array(tri, np.int32)], hot, cv2.LINE_AA)
+        jaw_teeth = _place(_LOWER_TEETH, (0.0, 0.0), jaw_drop, 1.0, 1.0)
+        for (tx, ty), depth in zip(jaw_teeth, (0.10, 0.11, 0.10, 0.08)):
+            tri = _place([(tx, ty), (tx - 0.06, ty), (tx - 0.03, ty - depth)],
+                         origin, angle, scale, flip)
+            cv2.fillPoly(layer, [np.array(tri, np.int32)], hot, cv2.LINE_AA)
+
+        eye = _place([_EYE], origin, angle, scale, flip)[0]
+        cv2.circle(layer, (int(eye[0]), int(eye[1])),
+                   max(2, int(scale * 0.05)), (0, 0, 0), -1, cv2.LINE_AA)
+        cv2.circle(layer, (int(eye[0]), int(eye[1])),
+                   max(1, int(scale * 0.026)), hot, -1, cv2.LINE_AA)
 
         frame[:] = cv2.add(frame, layer)
         return frame

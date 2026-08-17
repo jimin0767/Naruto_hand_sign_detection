@@ -42,6 +42,7 @@ from handsign.effects import (
     CloneSpec,
     DragonFireEffect,
     DragonSpec,
+    estimate_yaw,
     LightningEffect,
     TransformEffect,
     TransformSpec,
@@ -105,10 +106,10 @@ def main() -> int:
                         help="COCO segmentation model used to cut you out for clones")
     parser.add_argument("--pose-model", default="yolo11n-pose.pt",
                         help="COCO pose model used to find your mouth for fire jutsu")
-    parser.add_argument("--dragon-length", type=float, default=None,
-                        help="fire dragon body length as a fraction of frame width")
-    parser.add_argument("--dragon-angle", type=float, default=None,
-                        help="fire dragon launch angle in radians; negative aims upward")
+    parser.add_argument("--dragon-size", type=float, default=None,
+                        help="fire dragon head size as a fraction of frame width")
+    parser.add_argument("--dragon-reach", type=float, default=None,
+                        help="how far the dragon head sits from your mouth")
     parser.add_argument("--clones", type=int, default=None,
                         help="how many copies Clone Jutsu creates (default 6)")
     parser.add_argument("--no-mirror", action="store_true")
@@ -212,10 +213,10 @@ def main() -> int:
                         elif isinstance(spec, DragonSpec):
                             if args.effect_seconds:
                                 spec = replace(spec, duration=args.effect_seconds)
-                            if args.dragon_length:
-                                spec = replace(spec, length=args.dragon_length)
-                            if args.dragon_angle is not None:
-                                spec = replace(spec, angle=args.dragon_angle)
+                            if args.dragon_size:
+                                spec = replace(spec, size=args.dragon_size)
+                            if args.dragon_reach:
+                                spec = replace(spec, reach=args.dragon_reach)
                             if pose_model is None:
                                 from ultralytics import YOLO
                                 pose_model = YOLO(args.pose_model)
@@ -278,6 +279,8 @@ def main() -> int:
                         mbox = None
                         if pk.keypoints is not None and len(pk.keypoints):
                             kp = pk.keypoints.data[0].cpu().numpy()
+                            # Aim the dragon where the caster is looking.
+                            effect.set_yaw(estimate_yaw(kp))
                             if kp[0, 2] > 0.4:
                                 gap = float(np.hypot(kp[1, 0] - kp[2, 0],
                                                      kp[1, 1] - kp[2, 1]))

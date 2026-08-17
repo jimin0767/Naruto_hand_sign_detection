@@ -24,6 +24,7 @@ from handsign.effects import (
     TransformEffect,
     TransformSpec,
     cutout_from_mask,
+    estimate_yaw,
     key_background,
     load_sprite,
     LightningEffect,
@@ -615,101 +616,145 @@ class TestCloneRegistry:
         assert kinds == {"EffectSpec", "TransformSpec", "CloneSpec"}
 
 
+class TestEstimateYaw:
+    @staticmethod
+    def kp(nose_x, left_eye_x=120.0, right_eye_x=80.0, left_ear=0.9, right_ear=0.9):
+        a = np.zeros((17, 3), np.float32)
+        a[0] = (nose_x, 100, 0.9)
+        a[1] = (left_eye_x, 90, 0.9)
+        a[2] = (right_eye_x, 90, 0.9)
+        a[3] = (left_eye_x + 20, 95, left_ear)
+        a[4] = (right_eye_x - 20, 95, right_ear)
+        return a
+
+    def test_facing_camera_is_zero(self):
+        assert estimate_yaw(self.kp(100.0)) == pytest.approx(0.0, abs=0.05)
+
+    def test_turning_one_way_is_positive(self):
+        assert estimate_yaw(self.kp(115.0)) > 0.4
+
+    def test_turning_the_other_way_is_negative(self):
+        assert estimate_yaw(self.kp(85.0)) < -0.4
+
+    def test_clamped_to_unit_range(self):
+        assert -1.0 <= estimate_yaw(self.kp(400.0)) <= 1.0
+        assert -1.0 <= estimate_yaw(self.kp(-400.0)) <= 1.0
+
+    def test_scale_invariant(self):
+        """Same pose closer to the camera must give the same yaw."""
+        near = estimate_yaw(self.kp(110.0, 120.0, 80.0))
+        far = estimate_yaw(self.kp(105.0, 110.0, 90.0))
+        assert near == pytest.approx(far, abs=0.05)
+
+    def test_hidden_ear_forces_a_turn(self):
+        """A face turned far enough hides one ear even if the eyes still look central."""
+        assert estimate_yaw(self.kp(101.0, left_ear=0.05)) >= 0.35
+        assert estimate_yaw(self.kp(99.0, right_ear=0.05)) <= -0.35
+
+    def test_low_confidence_returns_none(self):
+        assert estimate_yaw(np.zeros((17, 3), np.float32)) is None
+
+    def test_collapsed_eyes_return_none(self):
+        assert estimate_yaw(self.kp(100.0, 100.0, 100.0)) is None
+
+
 class TestDragonFire:
     @pytest.fixture
     def fx(self):
         return DragonFireEffect(DragonSpec(), seed=0)
 
-    def test_spine_starts_at_the_mouth(self, fx):
-        pts = fx.spine((300.0, 200.0), (960, 540), 1.0)
-        assert pts[0] == pytest.approx((300.0, 200.0))
+    def test_head_grows_from_the_mouth(self, fx):
+        small = fx.head_pose((300.0, 200.0), (960, 540), 0.1)[2]
+        big = fx.head_pose((300.0, 200.0), (960, 540), 1.0)[2]
+        assert small < big
 
-    def test_spine_has_the_configured_segment_count(self, fx):
-        assert len(fx.spine((300.0, 200.0), (960, 540), 1.0)) == DragonSpec().segments
+    def test_growth_saturates(self, fx):
+        assert fx.extent(0.45) == pytest.approx(1.0)
+        assert fx.extent(4.0) == 1.0
 
-    def test_body_grows_from_the_mouth(self, fx):
-        def reach(age):
-            pts = fx.spine((300.0, 200.0), (960, 540), age)
-            return math.hypot(pts[-1][0] - 300.0, pts[-1][1] - 200.0)
-        assert reach(0.2) < reach(0.5) < reach(1.0)
+    def test_head_sits_clear_of_the_mouth(self, fx):
+        origin, _, _ = fx.head_pose((300.0, 200.0), (960, 540), 1.0)
+        assert abs(origin[0] - 300.0) > 50
 
-    def test_growth_stops_at_full_length(self, fx):
-        assert fx.extent(0.8) == 1.0 and fx.extent(4.0) == 1.0
+    def test_yaw_tilts_the_head(self, fx):
+        fx.yaw = 0.0
+        flat = fx.head_pose((300.0, 200.0), (960, 540), 1.0)[1]
+        fx.yaw = 1.0
+        turned = fx.head_pose((300.0, 200.0), (960, 540), 1.0)[1]
+        assert abs(turned) > abs(flat)
 
-    def test_undulation_animates(self, fx):
-        """A static flame shape reads as a smear; the travelling wave is the dragon."""
-        a = fx.spine((300.0, 200.0), (960, 540), 1.0)
-        b = fx.spine((300.0, 200.0), (960, 540), 1.25)
-        assert any(abs(p[1] - q[1]) > 1.0 for p, q in zip(a, b))
+    def test_tilt_stays_modest(self, fx):
+        """A steep tilt points the dragon at the floor instead of where you are looking."""
+        fx.yaw = 1.0
+        assert abs(fx.head_pose((300.0, 200.0), (960, 540), 1.0)[1]) < 0.6
 
-    def test_wave_is_pinned_at_the_mouth(self, fx):
-        """Otherwise the tail slides off the face as the wave travels."""
-        for age in (0.9, 1.1, 1.4, 1.9):
-            assert fx.spine((300.0, 200.0), (960, 540), age)[0] == pytest.approx((300.0, 200.0))
+    def test_set_yaw_eases_rather_than_snaps(self, fx):
+        fx.set_yaw(1.0)
+        first = fx.yaw
+        assert 0.0 < first < 1.0
+        fx.set_yaw(1.0)
+        assert fx.yaw > first
 
-    def test_flip_reverses_the_launch_direction(self, fx):
-        right = fx.spine((300.0, 200.0), (960, 540), 1.0, flip=1.0)[-1]
-        left = fx.spine((300.0, 200.0), (960, 540), 1.0, flip=-1.0)[-1]
-        assert right[0] > 300.0 > left[0]
+    def test_set_yaw_ignores_none(self, fx):
+        fx.set_yaw(0.8)
+        held = fx.yaw
+        fx.set_yaw(None)
+        assert fx.yaw == held
 
-    def test_launches_away_from_the_nearer_edge(self, frame):
-        """Fire aimed off the closest edge is wasted; it should fly into open picture."""
+    def test_aims_right_when_looking_right(self, frame):
         fx = DragonFireEffect(DragonSpec(), seed=1)
-        left_lit = frame.copy()
-        fx.draw(left_lit, (60.0, 120.0), 0.0, 1.5)
-        right_lit = np.full_like(frame, 30)
-        DragonFireEffect(DragonSpec(), seed=1).draw(right_lit, (580.0, 120.0), 0.0, 1.5)
-        assert left_lit[:, 400:].mean() > left_lit[:, :100].mean()
-        assert right_lit[:, :240].mean() > right_lit[:, 540:].mean()
+        fx.yaw = 0.9
+        fx.draw(frame, (320.0, 150.0), 0.0, 1.2)
+        assert frame[:, 340:].mean() > frame[:, :300].mean()
 
-    def test_body_tapers_at_both_ends(self, fx):
-        pts = [(float(x), 100.0) for x in range(0, 460, 10)]
-        poly = fx._body_polygon(pts, 40.0)
-        n = len(pts)
-        def thickness(i):
-            return abs(poly[i][1] - poly[2 * n - 1 - i][1])
-        assert thickness(0) < thickness(n // 2)
-        assert thickness(n - 1) < thickness(n // 2)
+    def test_aims_left_when_looking_left(self, frame):
+        fx = DragonFireEffect(DragonSpec(), seed=1)
+        fx.yaw = -0.9
+        fx.draw(frame, (320.0, 150.0), 0.0, 1.2)
+        assert frame[:, :300].mean() > frame[:, 340:].mean()
 
     def test_draw_brightens_the_frame(self, fx, frame):
         before = frame.mean()
-        fx.draw(frame, (200.0, 120.0), 0.0, 1.5)
+        fx.draw(frame, (250.0, 150.0), 0.0, 1.2)
         assert frame.mean() > before
 
     def test_nothing_before_ignition_or_after_expiry(self, fx, frame):
         for age in (-0.1, 0.0, 99.0):
             copy = frame.copy()
-            fx.draw(copy, (200.0, 120.0), 0.0, age)
+            fx.draw(copy, (250.0, 150.0), 0.0, age)
             assert np.array_equal(copy, frame), f"drew something at age {age}"
 
     def test_additive_saturates_rather_than_wrapping(self, frame):
         frame[:] = 250
-        DragonFireEffect(DragonSpec(), seed=2).draw(frame, (200.0, 120.0), 0.0, 1.5)
+        DragonFireEffect(DragonSpec(), seed=2).draw(frame, (250.0, 150.0), 0.0, 1.2)
         assert frame.min() >= 250
 
     def test_fire_is_warm_coloured(self, fx, frame):
         """A BGR mix-up would make Fire Style come out blue."""
-        fx.draw(frame, (200.0, 120.0), 0.0, 1.5)
+        fx.draw(frame, (250.0, 150.0), 0.0, 1.2)
         lit = frame[frame.max(axis=2) > 140]
-        assert len(lit) > 0
-        assert lit[:, 2].mean() > lit[:, 0].mean()
+        assert len(lit) > 0 and lit[:, 2].mean() > lit[:, 0].mean()
 
-    def test_consecutive_frames_differ(self, frame):
+    def test_mane_flickers_between_frames(self, frame):
         fx = DragonFireEffect(DragonSpec(), seed=4)
         a, b = frame.copy(), frame.copy()
-        fx.draw(a, (200.0, 120.0), 0.0, 1.5)
-        fx.draw(b, (200.0, 120.0), 0.0, 1.5)
+        fx.draw(a, (250.0, 150.0), 0.0, 1.2)
+        fx.draw(b, (250.0, 150.0), 0.0, 1.2)
         assert not np.array_equal(a, b)
 
     @pytest.mark.parametrize("mouth", [(0.0, 0.0), (639.0, 359.0), (-50.0, 180.0)])
     def test_offscreen_mouth_is_safe(self, fx, frame, mouth):
-        fx.draw(frame, mouth, 0.0, 1.5)
+        fx.draw(frame, mouth, 0.0, 1.2)
 
     def test_fades_out_at_the_end(self, fx, frame):
         mid, late = frame.copy(), frame.copy()
-        fx.draw(mid, (200.0, 120.0), 0.0, 2.0)
-        fx.draw(late, (200.0, 120.0), 0.0, DragonSpec().duration - 0.05)
+        fx.draw(mid, (250.0, 150.0), 0.0, 1.5)
+        fx.draw(late, (250.0, 150.0), 0.0, DragonSpec().duration - 0.05)
         assert late.mean() < mid.mean()
+
+    def test_head_geometry_is_not_degenerate(self):
+        from handsign.effects import _LOWER_JAW, _SKULL
+        assert len(_SKULL) >= 6 and len(_LOWER_JAW) >= 6
 
 
 class TestAllEffectsRegistered:
