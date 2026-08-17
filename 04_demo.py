@@ -34,6 +34,7 @@ from handsign import (
     SignSmoother,
     load_jutsu,
 )
+from handsign.effects import LightningEffect, effect_for
 from handsign.ui import Card, DemoUI, UIState
 
 DemoError = HandSignError
@@ -111,6 +112,10 @@ def main() -> int:
     jutsu_name: str | None = None
     jutsu_element = ""
     jutsu_at = 0.0
+    effect: LightningEffect | None = None
+    effect_at = 0.0
+    last_centre: tuple[float, float] | None = None
+    last_radius = 0.0
     writer = None
     frame_times: deque[float] = deque(maxlen=30)
     print("running -- q or Esc to quit, r to reset the sequence")
@@ -141,7 +146,11 @@ def main() -> int:
                         jutsu_name, jutsu_element, jutsu_at = (
                             matched.name, matched.english, now)
                         cards = []
-                        print(f"  *** {matched.name} ***")
+                        spec = effect_for(matched.name)
+                        if spec:
+                            effect, effect_at = LightningEffect(spec), now
+                        print(f"  *** {matched.name} ***"
+                              + ("  [effect]" if spec else ""))
                     else:
                         print(f"  {confirmed:8s} [{' > '.join(tracker.buffer)}]")
 
@@ -170,6 +179,21 @@ def main() -> int:
             scale = panel_w / frame.shape[1]
             if state.box:
                 state.box = tuple(v * scale for v in state.box)
+                x1, y1, x2, y2 = state.box
+                last_centre = ((x1 + x2) / 2, (y1 + y2) / 2)
+                last_radius = max(x2 - x1, y2 - y1) * 0.62
+
+            if effect is not None:
+                if now - effect_at > effect.spec.duration:
+                    effect = None
+                else:
+                    # Anchored to the live box while hands stay visible, and to the last
+                    # known position once they leave -- the effect must not snap to the
+                    # frame origin the moment detection drops.
+                    state.effect = effect
+                    state.effect_centre = last_centre
+                    state.effect_radius = last_radius
+                    state.effect_age = now - effect_at
             canvas = ui.render(frame, state, now)
 
             if args.record:
@@ -188,7 +212,7 @@ def main() -> int:
                 if key == ord("r"):
                     smoother.reset()
                     tracker.buffer.clear()
-                    cards, jutsu_name = [], None
+                    cards, jutsu_name, effect = [], None, None
                     print("  -- reset")
     finally:
         cap.release()

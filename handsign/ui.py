@@ -121,6 +121,12 @@ class UIState:
     jutsu_element: str = ""
     jutsu_age: float = 0.0
     fps: float = 0.0
+    # Jutsu effect, anchored to the hand. Owned by the demo loop; drawn here so it sits
+    # above the video but below the HUD, keeping the readouts legible through it.
+    effect: object | None = None
+    effect_centre: tuple[float, float] | None = None
+    effect_radius: float = 0.0
+    effect_age: float = 0.0
 
 
 class DemoUI:
@@ -294,6 +300,10 @@ class DemoUI:
             frame = cv2.resize(frame, (self.width, self.height))
         canvas = np.full((self.height + STRIP_H, self.width, 3), INK, np.uint8)
         canvas[:self.height] = frame
+
+        if st.effect is not None and st.effect_centre is not None:
+            view = canvas[:self.height]
+            st.effect.draw(view, st.effect_centre, st.effect_radius, st.effect_age)
 
         self._draw_detection(canvas, st)
         self._draw_held(canvas, st)

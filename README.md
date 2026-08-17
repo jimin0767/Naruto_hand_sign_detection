@@ -43,6 +43,7 @@ Weights are **not** in this repo — download `best.pt` (and `best.onnx`) from t
 | **Ring, top right** | countdown to sequence reset. Appears **only after you release a sign** — holding one steady never expires it |
 | **Card strip, bottom** | signs recognised so far: kanji above, English below. The same sign twice in a row does not stack |
 | **Orange banner** | a completed jutsu; it replaces the card strip for a few seconds |
+| **Lightning** | Chidori's effect, anchored to your hand for 2.6 s |
 
 **If a sign will not commit,** watch the brackets and the stability bar. Grey brackets mean
 the model sees the sign but is not confident enough to count it — the bar stalls partway
@@ -112,6 +113,20 @@ Fire Style,Fireball Jutsu,snake,ram,monkey,boar,horse,tiger
 Sequences come from [Narutopedia](https://naruto.fandom.com) infoboxes. Entries are
 restricted to 3–7 signs: one- and two-sign jutsu fire by accident during other sequences,
 and the longest canonical jutsu (Water Dragon, 44 signs) is impractical to perform.
+
+### Effects
+
+Chidori casts procedural lightning on your hand. Bolts are regenerated every frame from
+midpoint displacement rather than replaying a sprite animation — noise that never repeats
+reads as electricity, a looping clip reads as a sticker.
+
+The effect follows your hand using the live detection box, falling back to the last known
+position when your hands leave frame. This works *because* of the model's main weakness:
+it always emits a box whether or not you are making a valid sign, which is useless for
+recognition but serviceable as a hand tracker.
+
+Add more in `handsign/effects.py` — `EFFECTS` maps a jutsu name to an `EffectSpec`
+(colours, duration, bolt count). A name that does not match the table is caught by tests.
 
 `load_jutsu` rejects any sign the model cannot detect, and warns if a jutsu is
 **unreachable** — a shorter jutsu completing partway through a longer one clears the
