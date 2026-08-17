@@ -14,9 +14,12 @@ from handsign.effects import (
     CHIDORI,
     EFFECTS,
     AnchorTracker,
+    CloneEffect,
+    CloneSpec,
     EffectSpec,
     TransformEffect,
     TransformSpec,
+    cutout_from_mask,
     key_background,
     load_sprite,
     LightningEffect,
@@ -461,3 +464,148 @@ class TestEffectRegistryTypes:
         t = AnchorTracker()
         t.update((100.0, 50.0, 200.0, 350.0), 0.0)
         assert t.size == pytest.approx((100.0, 300.0))
+
+
+class TestCutoutFromMask:
+    def _scene(self, h=200, w=300):
+        return np.random.default_rng(0).integers(0, 255, (h, w, 3), dtype=np.uint8)
+
+    def test_returns_rgba_and_origin(self):
+        frame = self._scene()
+        mask = np.zeros((200, 300), np.float32)
+        mask[50:150, 80:200] = 1.0
+        rgba, origin = cutout_from_mask(frame, mask)
+        assert rgba.shape == (100, 120, 4)
+        assert origin == (80, 50)
+
+    def test_background_is_transparent(self):
+        frame = self._scene()
+        mask = np.zeros((200, 300), np.float32)
+        mask[50:150, 80:200] = 1.0
+        rgba, _ = cutout_from_mask(frame, mask)
+        assert rgba[50, 60, 3] == 255
+
+    def test_empty_mask_returns_none(self):
+        assert cutout_from_mask(self._scene(), np.zeros((200, 300), np.float32)) is None
+
+    def test_tiny_mask_returns_none(self):
+        mask = np.zeros((200, 300), np.float32)
+        mask[0:4, 0:4] = 1.0
+        assert cutout_from_mask(self._scene(), mask) is None
+
+    def test_keeps_only_the_largest_blob(self):
+        """The segmenter picks up furniture as a second 'person'; a floating scrap of
+        laundry cloned six times destroys the illusion."""
+        frame = self._scene()
+        mask = np.zeros((200, 300), np.float32)
+        mask[50:150, 80:200] = 1.0        # the person
+        mask[10:20, 10:25] = 1.0          # a stray blob
+        rgba, origin = cutout_from_mask(frame, mask)
+        assert origin == (80, 50), "cutout expanded to include the stray blob"
+
+    def test_bottom_cut_is_dissolved_when_it_touches_the_frame_edge(self):
+        """A shrunk, raised clone drags that straight edge into open picture."""
+        frame = self._scene()
+        mask = np.zeros((200, 300), np.float32)
+        mask[50:200, 80:200] = 1.0        # runs off the bottom
+        rgba, _ = cutout_from_mask(frame, mask)
+        alpha = rgba[:, :, 3]
+        assert alpha[-1, 60] < 40, "hard bottom edge survived"
+        assert alpha[len(alpha) // 2, 60] > 200, "fade ate the body"
+
+    def test_no_fade_when_the_subject_ends_inside_the_frame(self):
+        frame = self._scene()
+        mask = np.zeros((200, 300), np.float32)
+        mask[50:150, 80:200] = 1.0        # clear of the bottom
+        rgba, _ = cutout_from_mask(frame, mask)
+        assert rgba[-1, 60, 3] > 200
+
+
+class TestCloneEffect:
+    @pytest.fixture
+    def cutout(self):
+        rgba = np.zeros((240, 120, 4), np.uint8)
+        rgba[:, :, :3] = (60, 90, 200)
+        rgba[:, :, 3] = 255
+        return rgba
+
+    @pytest.fixture
+    def fx(self, cutout):
+        e = CloneEffect(CloneSpec(duration=5.0, count=6, stagger=0.1), seed=0)
+        e.set_cutout(cutout, (200, 60))
+        return e
+
+    def test_placement_count_matches_spec(self, fx):
+        assert len(fx.placements()) == 6
+
+    def test_placements_are_mirrored_pairs(self, fx):
+        sides = sorted(side for _, side, _, _ in fx.placements())
+        assert sides.count(-1.0) == sides.count(1.0) == 3
+
+    def test_drawn_far_to_near(self, fx):
+        depths = [d for d, _, _, _ in fx.placements()]
+        assert depths == sorted(depths, reverse=True)
+
+    def test_deeper_clones_are_smaller(self, fx):
+        by_depth = {d: s for d, _, s, _ in fx.placements()}
+        assert by_depth[1] > by_depth[2] > by_depth[3]
+
+    def test_scale_never_collapses(self):
+        fx = CloneEffect(CloneSpec(count=20, shrink=0.4))
+        assert all(scale >= 0.25 for _, _, scale, _ in fx.placements())
+
+    def test_clones_appear_staggered(self, fx):
+        assert fx.alpha_for(0, 0.02) < fx.alpha_for(0, 0.4)
+        assert fx.alpha_for(5, 0.05) == 0.0        # last clone has not started
+
+    def test_all_clones_visible_mid_effect(self, fx):
+        assert all(fx.alpha_for(i, 2.0) == 1.0 for i in range(6))
+
+    def test_all_fade_together_at_the_end(self, fx):
+        assert all(0.0 <= fx.alpha_for(i, 4.9) < 0.5 for i in range(6))
+
+    def test_draw_without_a_cutout_is_a_no_op(self, frame):
+        fx = CloneEffect(CloneSpec())
+        before = frame.copy()
+        fx.draw(frame, (320.0, 180.0), 100.0, 1.0)
+        assert np.array_equal(frame, before)
+
+    def test_draw_changes_the_frame(self, fx, frame):
+        before = frame.copy()
+        fx.draw(frame, (320.0, 180.0), 100.0, 2.0)
+        assert not np.array_equal(frame, before)
+
+    def test_caster_is_composited_last(self, fx, frame):
+        """Clones drawn near the caster would otherwise cover them, which reads as
+        vanishing rather than multiplying."""
+        fx.draw(frame, (320.0, 180.0), 100.0, 2.0)
+        ox, oy = fx.origin
+        assert frame[oy + 100, ox + 60].tolist() == [60, 90, 200]
+
+    def test_nothing_drawn_when_expired(self, fx, frame):
+        before = frame.copy()
+        fx.draw(frame, (320.0, 180.0), 100.0, 99.0)
+        assert np.array_equal(frame, before)
+
+    def test_cutout_near_the_frame_edge_is_safe(self, cutout, frame):
+        fx = CloneEffect(CloneSpec(), seed=1)
+        fx.set_cutout(cutout, (620, 340))
+        fx.draw(frame, (320.0, 180.0), 100.0, 2.0)
+
+    def test_set_cutout_ignores_none(self, fx, cutout):
+        fx.set_cutout(None, (0, 0))
+        assert fx.cutout is cutout and fx.origin == (200, 60)
+
+    def test_clone_count_is_configurable(self, cutout):
+        fx = CloneEffect(CloneSpec(count=4))
+        assert len(fx.placements()) == 4
+
+
+class TestCloneRegistry:
+    def test_clone_jutsu_registered(self):
+        assert isinstance(effect_for("Clone Jutsu"), CloneSpec)
+
+    def test_all_three_effects_are_distinct_types(self):
+        kinds = {type(effect_for(n)).__name__
+                 for n in ("Chidori", "Transformation Jutsu", "Clone Jutsu")}
+        assert kinds == {"EffectSpec", "TransformSpec", "CloneSpec"}

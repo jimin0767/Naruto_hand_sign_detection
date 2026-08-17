@@ -37,9 +37,12 @@ from handsign import (
 )
 from handsign.effects import (
     AnchorTracker,
+    CloneEffect,
+    CloneSpec,
     LightningEffect,
     TransformEffect,
     TransformSpec,
+    cutout_from_mask,
     effect_for,
     load_sprite,
 )
@@ -95,6 +98,10 @@ def main() -> int:
                              "the sprite looks too small for you")
     parser.add_argument("--person-model", default="yolo11n.pt",
                         help="COCO model used to locate you during a sprite transform")
+    parser.add_argument("--segment-model", default="yolo11n-seg.pt",
+                        help="COCO segmentation model used to cut you out for clones")
+    parser.add_argument("--clones", type=int, default=None,
+                        help="how many copies Clone Jutsu creates (default 6)")
     parser.add_argument("--no-mirror", action="store_true")
     parser.add_argument("--record", type=Path, default=None)
     parser.add_argument("--headless", action="store_true",
@@ -138,6 +145,7 @@ def main() -> int:
     # A second tracker: sprite transforms need the whole person, not the hands.
     person_anchor = AnchorTracker(snap_distance=260.0)
     person_model = None
+    segment_model = None
 
     sprite = None
     if args.transform_image.exists():
@@ -190,6 +198,15 @@ def main() -> int:
                                     person_model = YOLO(args.person_model)
                                 person_anchor.reset()
                                 effect, effect_at = TransformEffect(spec, sprite), now
+                        elif isinstance(spec, CloneSpec):
+                            if args.effect_seconds:
+                                spec = replace(spec, duration=args.effect_seconds)
+                            if args.clones:
+                                spec = replace(spec, count=args.clones)
+                            if segment_model is None:
+                                from ultralytics import YOLO
+                                segment_model = YOLO(args.segment_model)
+                            effect, effect_at = CloneEffect(spec), now
                         elif spec:
                             if args.effect_seconds:
                                 spec = replace(spec, duration=args.effect_seconds)
@@ -230,7 +247,26 @@ def main() -> int:
                 if now - effect_at > effect.spec.duration:
                     effect = None
                 else:
-                    if isinstance(effect, TransformEffect):
+                    if isinstance(effect, CloneEffect):
+                        # Re-cut every frame so the clones mirror the caster's movement;
+                        # a frozen cutout reads as pasted stills, not clones.
+                        sr = segment_model.predict(frame, conf=0.35, classes=[0],
+                                                   verbose=False, device=args.device)[0]
+                        if sr.masks is not None and len(sr.masks):
+                            mask = cv2.resize(sr.masks.data[0].cpu().numpy(),
+                                              (frame.shape[1], frame.shape[0]))
+                            cut = cutout_from_mask(frame, mask)
+                            if cut is not None:
+                                rgba, (ox, oy) = cut
+                                # Segmentation runs on the capture frame; the canvas is
+                                # the resized panel, so both cutout and origin scale.
+                                rgba = cv2.resize(
+                                    rgba, (max(1, int(rgba.shape[1] * scale)),
+                                           max(1, int(rgba.shape[0] * scale))),
+                                    interpolation=cv2.INTER_AREA)
+                                effect.set_cutout(rgba, (int(ox * scale), int(oy * scale)))
+                        anchored = ((panel_w / 2, panel_h / 2), panel_h / 2)
+                    elif isinstance(effect, TransformEffect):
                         # Person detection only runs while a sprite transform is on
                         # screen, so it costs nothing the rest of the time.
                         pr = person_model.predict(frame, conf=0.35, classes=[0],

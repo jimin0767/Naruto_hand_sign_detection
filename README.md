@@ -45,6 +45,7 @@ Weights are **not** in this repo — download `best.pt` (and `best.onnx`) from t
 | **Orange banner** | a completed jutsu; it replaces the card strip for a few seconds |
 | **Lightning** | Chidori's effect, tracking your hand for 5 s (`--effect-seconds` to change) |
 | **Smoke, then a character** | Transformation Jutsu, tracking your whole body for 6 s |
+| **A crowd of you** | Clone Jutsu, six copies mirroring your movement for 6 s |
 
 **If a sign will not commit,** watch the brackets and the stability bar. Grey brackets mean
 the model sees the sign but is not confident enough to count it — the bar stalls partway
@@ -157,9 +158,22 @@ sprite height = 1.3x your detected person box).
 
 `assets/` is gitignored. Teammates supply their own copy.
 
+**Clone Jutsu** segments you with `yolo11n-seg` and composites six copies in a receding
+formation, each popping in with its own puff of smoke. The cutout is refreshed **every
+frame**, so the clones mirror your movement — that live sync is what sells them as clones
+rather than pasted stills. `--clones N` changes the count.
+
+Two details that are not obvious. Clone spacing is a fraction of the **frame** width, not
+of your cutout: with your arms outstretched the cutout is nearly frame-wide, so
+cutout-relative spacing throws the far pairs off screen. And when you run off the bottom
+of the frame your silhouette ends in a straight horizontal cut — invisible on you, since
+it sits on the frame edge, but a shrunk and lifted clone drags that line into open picture
+where it reads as a pasted rectangle, so the bottom of every cutout is dissolved into a
+gradient.
+
 Add more in `handsign/effects.py` — `EFFECTS` maps a jutsu name to an `EffectSpec`
-(procedural) or a `TransformSpec` (sprite). A name that does not match the jutsu table is
-caught by tests.
+(procedural), a `TransformSpec` (sprite), or a `CloneSpec`. A name that does not match the
+jutsu table is caught by tests.
 
 `load_jutsu` rejects any sign the model cannot detect, and warns if a jutsu is
 **unreachable** — a shorter jutsu completing partway through a longer one clears the

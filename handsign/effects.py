@@ -433,13 +433,155 @@ class TransformEffect:
         return frame
 
 
-TRANSFORMATION = TransformSpec(
-    duration=6.0,
-    smoke_s=0.55,
-    scale=1.3,
-)
+
+# --------------------------------------------------------------------------------------
+# Clone jutsu (copies of the caster, receding into the distance)
+# --------------------------------------------------------------------------------------
+
+@dataclass
+class CloneSpec:
+    """Arrangement and timing for duplicated copies of the caster."""
+    duration: float = 6.0
+    count: int = 6                 # mirrored pairs, so even numbers arrange symmetrically
+    stagger: float = 0.13          # delay between each clone popping in
+    fade: float = 0.6
+    # Spacing is a fraction of the FRAME width, not the cutout width. A caster with
+    # arms outstretched produces a near-frame-wide cutout, so cutout-relative spacing
+    # throws the far pairs off screen while the near pair buries the caster.
+    spread: float = 0.155          # horizontal gap per depth step, as a fraction of frame
+    shrink: float = 0.17           # scale lost per depth step
+    rise: float = 0.10             # upward shift per depth step, as a fraction of height
+    smoke_s: float = 0.45
+    smoke_colour: tuple[int, int, int] = (232, 232, 236)
+
+
+def cutout_from_mask(frame: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, tuple[int, int]] | None:
+    """Build a tight RGBA cutout of the masked subject, plus its top-left in the frame."""
+    binary = (mask > 0.5).astype(np.uint8)
+    if binary.sum() < 64:
+        return None
+    # Keep only the largest blob: the segmenter occasionally picks up furniture or a
+    # reflection as a second "person", and a floating scrap of laundry breaks the illusion.
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+    if count > 2:
+        largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        binary = (labels == largest).astype(np.uint8)
+
+    ys, xs = np.where(binary > 0)
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    patch = frame[y0:y1, x0:x1]
+    alpha = (binary[y0:y1, x0:x1] * 255).astype(np.uint8)
+    # Soften the cut edge slightly; a hard mask boundary reads as a paper cutout.
+    alpha = cv2.GaussianBlur(alpha, (0, 0), 1.2)
+
+    if y1 >= frame.shape[0]:
+        # The subject runs off the bottom of the frame, so the silhouette ends in a
+        # straight horizontal cut. Invisible on the caster -- it sits on the frame edge --
+        # but a clone is shrunk and lifted, which drags that line into open picture where
+        # it reads as a pasted rectangle. Dissolve it into a gradient instead.
+        height = alpha.shape[0]
+        band = max(4, int(height * 0.18))
+        ramp = np.linspace(1.0, 0.0, band, dtype=np.float32)[:, None]
+        alpha[-band:] = (alpha[-band:] * ramp).astype(np.uint8)
+
+    return np.dstack([patch, alpha]), (x0, y0)
+
+
+class CloneEffect:
+    """Duplicate the caster into a receding formation.
+
+    The cutout is refreshed every frame, so the clones mirror the caster's movement --
+    that live sync is what sells them as clones rather than as pasted stills.
+
+    Drawn far-to-near, with the caster's own cutout composited last so the real person
+    always ends up in front of their copies.
+    """
+
+    def __init__(self, spec: CloneSpec, seed: int | None = None):
+        self.spec = spec
+        self.rng = np.random.default_rng(seed)
+        self.cutout: np.ndarray | None = None
+        self.origin: tuple[int, int] = (0, 0)
+
+    def set_cutout(self, cutout: np.ndarray | None, origin: tuple[int, int]) -> None:
+        """Called once per frame with a fresh segmentation, if one is available."""
+        if cutout is not None:
+            self.cutout, self.origin = cutout, origin
+
+    def placements(self) -> list[tuple[int, float, float, float]]:
+        """(depth, side, scale, index) for each clone, far ones first."""
+        out = []
+        for i in range(self.spec.count):
+            depth = i // 2 + 1
+            side = -1.0 if i % 2 == 0 else 1.0
+            out.append((depth, side, max(0.25, 1.0 - self.spec.shrink * depth), i))
+        out.sort(key=lambda p: -p[0])          # far to near
+        return out
+
+    def alpha_for(self, index: int, age: float) -> float:
+        s = self.spec
+        start = index * s.stagger
+        if age < start:
+            return 0.0
+        if age > s.duration - s.fade:
+            return max(0.0, (s.duration - age) / s.fade)
+        return min(1.0, (age - start) / max(s.smoke_s * 0.5, 1e-6))
+
+    def _puff(self, frame, cx, cy, radius, strength) -> None:
+        if strength <= 0.02:
+            return
+        layer = np.zeros_like(frame)
+        for _ in range(7):
+            angle = self.rng.uniform(0, 2 * math.pi)
+            dist = self.rng.uniform(0, radius * 0.7)
+            cv2.circle(layer,
+                       (int(cx + math.cos(angle) * dist), int(cy + math.sin(angle) * dist)),
+                       max(4, int(radius * self.rng.uniform(0.3, 0.6))),
+                       self.spec.smoke_colour, -1)
+        layer = cv2.GaussianBlur(layer, (0, 0), max(5.0, radius * 0.18))
+        cv2.addWeighted(frame, 1.0, layer, strength, 0, frame)
+
+    def draw(self, frame: np.ndarray, centre: tuple[float, float],
+             radius: float, age: float) -> np.ndarray:
+        if self.cutout is None or age < 0 or age > self.spec.duration:
+            return frame
+        s = self.spec
+        ch, cw = self.cutout.shape[:2]
+        ox, oy = self.origin
+
+        for depth, side, scale, index in self.placements():
+            level = self.alpha_for(index, age)
+            if level <= 0.01:
+                continue
+            tw, th = max(8, int(cw * scale)), max(8, int(ch * scale))
+            resized = cv2.resize(self.cutout, (tw, th), interpolation=cv2.INTER_AREA)
+            # Flank the caster, and lift each step back so the formation recedes rather
+            # than standing in a flat row. Overlap is fine -- it reads as a crowd.
+            x = int(ox + cw / 2 + side * frame.shape[1] * s.spread * depth - tw / 2)
+            y = int(oy + ch * (1 - scale) - ch * s.rise * depth)
+
+            appearing = age - index * s.stagger
+            if appearing < s.smoke_s:
+                self._puff(frame, x + tw / 2, y + th / 2, max(20.0, tw * 0.45),
+                           float(np.sin(np.pi * max(0.0, appearing) / s.smoke_s) ** 0.7))
+            blit_rgba(frame, resized, x, y, level)
+
+        # The caster goes back on top: clones drawn near them would otherwise cover the
+        # real person, which looks like they vanished rather than multiplied.
+        blit_rgba(frame, self.cutout, ox, oy, 1.0)
+        return frame
+
+
+# --------------------------------------------------------------------------------------
+# Registry -- last in the file so every spec class above is already defined.
+# --------------------------------------------------------------------------------------
+
+TRANSFORMATION = TransformSpec(duration=6.0, smoke_s=0.55, scale=1.3)
+CLONE = CloneSpec(duration=6.0, count=6)
 
 EFFECTS.update({
     "Chidori": CHIDORI,
     "Transformation Jutsu": TRANSFORMATION,
+    "Clone Jutsu": CLONE,
 })
