@@ -188,12 +188,27 @@ through a temperature ramp, and that is what produces continuous flame instead o
 overlapping orange circles. The field is built and coloured at half resolution, since the
 blur discards that detail anyway; doing it full-size cost 3x the time for no visible gain.
 
+The shape is a **narrow neck at the lips flaring into a billowing mass**, which is what
+real fire-breathing looks like. That flare comes from a lateral `bloom` force that ramps
+with particle age, not from spraying wide at the mouth — spraying wide just gives a uniform
+cone. A scrolling multi-octave noise field carves the billows; without it the plume is the
+right shape but reads as a glow rather than fire.
+
+Every force scales by frame **width**, matching `reach`. Mixing width and height makes the
+physics depend on the camera's aspect ratio — a 4:3 panel multiplies the scattering forces
+by 1.33x against an unchanged jet length, and the plume blows apart into loose blobs.
+
 Tune it to your framing:
 
 ```bash
 python 04_demo.py --flame-reach 0.7      # longer jet
 python 04_demo.py --flame-spread 0.4     # wider, fatter cone
+python 04_demo.py --flame-size 0.09      # heavier, more opaque fire
+python 04_demo.py --flame-bloom 2.2      # flares harder into a fireball
 ```
+
+Additive light on a bright background washes out, so it reads far more strongly against a
+darker wall. If it looks weak on camera, raise `--flame-size` before anything else.
 
 If you raise `rate` or `life` in `FlameSpec`, keep `rate * life` under `max_particles`.
 The cap discards the *oldest* particles, which are the far end of the jet, so exceeding it

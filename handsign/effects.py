@@ -611,17 +611,26 @@ class FlameSpec:
     duration: float = 5.0
     ramp: float = 0.30             # seconds for the jet to reach full pressure
     fade: float = 0.7
-    reach: float = 0.55            # jet length as a fraction of frame width
-    spread: float = 0.26           # cone half-angle, radians
+    reach: float = 0.52            # jet length as a fraction of frame width
+    spread: float = 0.20           # launch cone half-angle; the flare comes mostly
+                                   # from `bloom`, not from spraying wide at the mouth
     yaw_swing: float = 1.15        # radians of aim at full head yaw
     rate: int = 620                # particles per SECOND; must stay under
                                    # max_particles/life or the cap truncates the
                                    # oldest particles, which are the jet's far end
-    life: float = 0.85             # particle lifetime, seconds
-    buoyancy: float = 0.55         # upward drift as a fraction of frame height per second
-    turbulence: float = 0.75       # random walk strength
-    size: float = 0.034            # particle radius at death, fraction of frame height
-    max_particles: int = 700
+    life: float = 0.95             # particle lifetime, seconds
+    # Every force below scales by frame WIDTH, matching `reach`. Mixing width and height
+    # makes the physics depend on the camera's aspect ratio: a 4:3 panel multiplies the
+    # scattering forces by 1.33x against an unchanged jet length, and the plume blows
+    # apart into loose blobs.
+    buoyancy: float = 0.32         # upward drift as a fraction of frame width per second
+    turbulence: float = 0.62       # random walk strength
+    bloom: float = 1.50            # lateral spreading force, grows with age
+    detail: float = 0.80           # how hard the noise texture breaks up the field
+    size: float = 0.062            # particle radius at death, fraction of frame width
+    max_particles: int = 620
+    standoff: float = 0.055        # spawn this far forward of the lips, as a fraction of
+                                   # frame width, so the neck clears the caster's face
 
 
 def fire_lut() -> np.ndarray:
@@ -636,11 +645,12 @@ def fire_lut() -> np.ndarray:
     """
     stops = [
         (0.00, (0, 0, 0)),
-        (0.18, (0, 0, 60)),
-        (0.34, (0, 24, 160)),
-        (0.52, (10, 90, 235)),
-        (0.70, (40, 175, 255)),
-        (0.86, (150, 240, 255)),
+        (0.10, (0, 6, 90)),
+        (0.22, (0, 40, 200)),
+        (0.38, (15, 115, 250)),
+        (0.55, (55, 185, 255)),
+        (0.72, (130, 230, 255)),
+        (0.88, (210, 250, 255)),
         (1.00, (255, 255, 255)),
     ]
     lut = np.zeros((256, 1, 3), np.uint8)
@@ -672,8 +682,9 @@ class FlameBreathEffect:
         self.rng = np.random.default_rng(seed)
         self.yaw = 0.0
         self.last_time: float | None = None
-        # Columns: x, y, vx, vy, age, heat
-        self.particles = np.zeros((0, 6), np.float32)
+        # Columns: x, y, vx, vy, age, heat, perp_x, perp_y
+        self.particles = np.zeros((0, 8), np.float32)
+        self._noise: np.ndarray | None = None
 
     def set_yaw(self, yaw: float | None) -> None:
         """Aim the jet where the caster is looking; None keeps the previous value."""
@@ -702,16 +713,27 @@ class FlameBreathEffect:
         width, height = frame_size
         speed = s.reach * width / max(s.life, 1e-6)
         angle = self.aim()
-        new = np.zeros((count, 6), np.float32)
+        new = np.zeros((count, 8), np.float32)
         jitter = self.rng.normal(0.0, s.spread * 0.5, count)
         # Speed varies per particle. A uniform jet reads as a solid cone; the spread of
         # velocities is what gives flame its ragged, licking edge.
         speeds = speed * self.rng.uniform(0.45, 1.15, count) * (0.55 + 0.45 * level)
-        new[:, 0] = mouth[0] + self.rng.normal(0.0, height * 0.008, count)
-        new[:, 1] = mouth[1] + self.rng.normal(0.0, height * 0.008, count)
+        # Offset forward along the aim: spawning on the lips buries the hottest part of
+        # the jet in the caster's own face, which is where it is least visible and most
+        # distracting.
+        stand = s.standoff * width
+        new[:, 0] = (mouth[0] + math.cos(angle) * stand
+                     + self.rng.normal(0.0, width * 0.006, count))
+        new[:, 1] = (mouth[1] + math.sin(angle) * stand
+                     + self.rng.normal(0.0, width * 0.006, count))
         new[:, 2] = np.cos(angle + jitter) * speeds
         new[:, 3] = np.sin(angle + jitter) * speeds
         new[:, 5] = self.rng.uniform(0.7, 1.0, count)
+        # Which way "sideways" is for this particle, and how hard it blooms. Signed, so
+        # half the plume peels off each side of the axis rather than all one way.
+        sway = self.rng.uniform(-1.0, 1.0, count)
+        new[:, 6] = -math.sin(angle) * sway
+        new[:, 7] = math.cos(angle) * sway
         self.particles = np.vstack([self.particles, new])[-s.max_particles:]
 
     def _advance(self, dt, frame_size):
@@ -726,13 +748,38 @@ class FlameBreathEffect:
         decay = max(0.0, 1.0 - 1.1 * dt)
         p[:, 2] *= decay
         p[:, 3] *= decay
-        p[:, 3] -= s.buoyancy * frame_size[1] * dt
+        p[:, 3] -= s.buoyancy * frame_size[0] * dt
+        # Lateral bloom, ramped by age: this is what makes a narrow neck at the mouth
+        # flare into a billowing mass instead of staying a uniform cone. Spraying wide
+        # at the mouth gives a cone; spreading with distance gives a fireball.
+        ramp = (p[:, 4] / s.life) ** 1.4
+        p[:, 2] += p[:, 6] * s.bloom * frame_size[0] * ramp * dt
+        p[:, 3] += p[:, 7] * s.bloom * frame_size[0] * ramp * dt
         if s.turbulence:
-            wobble = s.turbulence * frame_size[1] * dt
+            wobble = s.turbulence * frame_size[0] * dt
             p[:, 2] += self.rng.normal(0.0, wobble, len(p))
             p[:, 3] += self.rng.normal(0.0, wobble, len(p))
         p[:, 4] += dt
         self.particles = p[p[:, 4] < s.life]
+
+    def _turbulence_field(self, shape, age):
+        """A scrolling multi-octave noise tile used to break up the heat field.
+
+        Without it the field is a smooth blob: correct in shape, but it reads as a glow
+        rather than fire, because real flame has structure at every scale. Built once and
+        scrolled, since regenerating noise per frame is both slower and flickers.
+        """
+        if self._noise is None or self._noise.shape != shape:
+            h, w = shape
+            field = np.zeros(shape, np.float32)
+            for octave, weight in ((5, 0.48), (11, 0.32), (23, 0.20)):
+                small = self.rng.random((max(2, h // octave), max(2, w // octave)),
+                                        dtype=np.float32)
+                field += cv2.resize(small, (w, h), interpolation=cv2.INTER_CUBIC) * weight
+            self._noise = np.clip(field, 0.0, 1.0)
+        # Scroll along the jet so the structure appears to travel outward with the gas.
+        shift = int(age * 220) % shape[1]
+        return np.roll(self._noise, -shift, axis=1)
 
     def draw(self, frame: np.ndarray, centre: tuple[float, float],
              radius: float, age: float) -> np.ndarray:
@@ -755,8 +802,8 @@ class FlameBreathEffect:
         scale = 0.5
         hh, hw = int(height * scale), int(width * scale)
         heat = np.zeros((hh, hw), np.float32)
-        max_radius = s.size * height * scale
-        for x, y, _, _, born, hot in self.particles:
+        max_radius = s.size * width * scale
+        for x, y, _, _, born, hot, _, _ in self.particles:
             t = float(born) / s.life
             # Cool and swell with age: a small bright core leaving the mouth becomes a
             # large faint smudge by the time it dies.
@@ -765,15 +812,27 @@ class FlameBreathEffect:
             # Each particle contributes only a sliver. Full-strength blobs saturate the
             # field to white on the first overlap, which is a glowing lozenge, not fire --
             # the gradient has to be built up by accumulation.
-            value = float(float(hot) * 0.46 * (1.0 - t) ** 1.5 * level)
+            # Young particles run much hotter, which gives a bright neck at the mouth
+            # that cools along the plume -- the gradient real fire has.
+            value = float(float(hot) * 0.40 * (1.0 - t) ** 1.1 * level)
             cv2.circle(heat, (int(x * scale), int(y * scale)), radius_px, value, -1)
 
-        # The ignition point itself: the jet is spread thin over its length, so without
-        # this the mouth never reaches white and the whole plume stays dull red.
-        cv2.circle(heat, (int(centre[0] * scale), int(centre[1] * scale)),
-                   max(2, int(max_radius * 0.85)), float(level), -1)
+        # The ignition point. Small and pushed forward of the lips on purpose: a large
+        # disc centred on the mouth reads as a lightbulb held to the face, and it hides
+        # the caster. The hot NECK comes from young particles, not from this.
+        aim = self.aim()
+        stand = s.standoff * width * scale
+        lip = (centre[0] * scale + math.cos(aim) * stand,
+               centre[1] * scale + math.sin(aim) * stand)
+        cv2.circle(heat, (int(lip[0]), int(lip[1])),
+                   max(2, int(max_radius * 0.30)), float(level * 0.9), -1)
 
-        heat = cv2.GaussianBlur(heat, (0, 0), max(1.5, max_radius * 0.30))
+        heat = cv2.GaussianBlur(heat, (0, 0), max(1.5, max_radius * 0.16))
+        # Contrast-stretched so the noise carves visible billows rather than a faint
+        # mottling; a low-contrast multiply just dims the field uniformly.
+        texture = self._turbulence_field(heat.shape, age)
+        texture = np.clip((texture - 0.35) * 2.6 + 0.5, 0.0, 1.4)
+        heat *= (1.0 - s.detail) + s.detail * texture
         heat = np.clip(heat, 0.0, 1.0)
         # Colour at half resolution too, then upscale: the alternative is three
         # full-resolution float passes for detail the blur already discarded.

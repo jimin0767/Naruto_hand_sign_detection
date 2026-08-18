@@ -804,3 +804,74 @@ class TestAllEffectsRegistered:
     def test_each_uses_a_distinct_spec_type(self):
         kinds = {type(v).__name__ for v in EFFECTS.values()}
         assert kinds == {"EffectSpec", "TransformSpec", "CloneSpec", "FlameSpec"}
+
+
+class TestFlameShape:
+    """The reference is a narrow neck at the lips flaring into a billowing mass."""
+
+    def step(self, fx, frame, until, mouth=(200.0, 150.0), dt=1 / 30):
+        t = 0.0
+        while t < until:
+            t += dt
+            fx.draw(frame, mouth, 0.0, t)
+        return frame
+
+    def test_plume_widens_with_distance(self, frame):
+        """A uniform cone is what spraying wide at the mouth gives; bloom is what turns
+        it into a fireball, so the far half must be visibly wider than the near half."""
+        fx = FlameBreathEffect(FlameSpec(), seed=5)
+        fx.yaw = 0.0
+        self.step(fx, frame, 2.0, mouth=(120.0, 180.0))
+        p = fx.particles
+        near = p[p[:, 0] < 260]
+        far = p[p[:, 0] > 340]
+        assert len(near) > 5 and len(far) > 5
+        assert far[:, 1].std() > near[:, 1].std() * 1.4
+
+    def test_bloom_pushes_both_ways(self):
+        """Signed sway: an unsigned one peels the whole plume off to one side."""
+        fx = FlameBreathEffect(FlameSpec(), seed=6)
+        fx.yaw = 0.0
+        self.step(fx, np.full((360, 640, 3), 20, np.uint8), 1.5, mouth=(120.0, 180.0))
+        perp = fx.particles[:, 7]
+        assert (perp > 0).any() and (perp < 0).any()
+
+    def test_turbulence_field_is_cached_and_scrolls(self):
+        fx = FlameBreathEffect(FlameSpec(), seed=7)
+        a = fx._turbulence_field((80, 160), 0.0)
+        cached = fx._noise
+        b = fx._turbulence_field((80, 160), 1.0)
+        assert fx._noise is cached, "noise regenerated instead of scrolled"
+        assert not np.array_equal(a, b), "field did not scroll"
+
+    def test_turbulence_modulates_the_field(self, frame):
+        """The octaves are coarse on purpose: they carve billows, not sparks.
+
+        Note this *reduces* high-frequency energy rather than adding it -- dimming parts
+        of the field softens edges -- so a Laplacian test would fail for the right reason.
+        What matters is that the field is no longer uniform.
+        """
+        from dataclasses import replace
+        smooth = FlameBreathEffect(replace(FlameSpec(), detail=0.0), seed=8)
+        rough = FlameBreathEffect(FlameSpec(), seed=8)
+        a = self.step(smooth, frame.copy(), 1.5)
+        b = self.step(rough, frame.copy(), 1.5)
+        # Measured over affected pixels, not the frame mean: most of the frame is
+        # background, which dilutes any average to near zero regardless.
+        changed = (np.abs(a.astype(int) - b.astype(int)).max(axis=2) > 10)
+        assert changed.mean() > 0.03, f"only {changed.mean() * 100:.1f}% of pixels moved"
+
+    def test_turbulence_field_is_not_flat(self):
+        field = FlameBreathEffect(FlameSpec(), seed=8)._turbulence_field((120, 200), 0.0)
+        assert field.std() > 0.08, "noise is too uniform to carve anything"
+        assert 0.0 <= field.min() and field.max() <= 1.0
+
+    def test_ignition_core_does_not_cover_the_face(self, frame):
+        """A big disc centred on the mouth reads as a lightbulb and hides the caster."""
+        fx = FlameBreathEffect(FlameSpec(), seed=9)
+        fx.yaw = 0.0
+        mouth = (200.0, 150.0)
+        self.step(fx, frame, 1.2, mouth=mouth)
+        # Well behind the lips -- immediately behind is legitimately lit by blur spill.
+        behind = frame[110:190, 60:150]
+        assert behind.max() < 250, "core is blowing out the caster's face"

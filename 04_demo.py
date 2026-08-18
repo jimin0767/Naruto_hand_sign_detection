@@ -110,6 +110,11 @@ def main() -> int:
                         help="flame jet length as a fraction of frame width")
     parser.add_argument("--flame-spread", type=float, default=None,
                         help="flame cone half-angle in radians; wider is a fatter jet")
+    parser.add_argument("--flame-size", type=float, default=None,
+                        help="flame puff size as a fraction of frame width (default 0.062); "
+                             "raise for a heavier, more opaque fire")
+    parser.add_argument("--flame-bloom", type=float, default=None,
+                        help="how hard the jet flares into a fireball (default 1.5)")
     parser.add_argument("--clones", type=int, default=None,
                         help="how many copies Clone Jutsu creates (default 6)")
     parser.add_argument("--no-mirror", action="store_true")
@@ -217,6 +222,10 @@ def main() -> int:
                                 spec = replace(spec, reach=args.flame_reach)
                             if args.flame_spread:
                                 spec = replace(spec, spread=args.flame_spread)
+                            if args.flame_size:
+                                spec = replace(spec, size=args.flame_size)
+                            if args.flame_bloom:
+                                spec = replace(spec, bloom=args.flame_bloom)
                             if pose_model is None:
                                 from ultralytics import YOLO
                                 pose_model = YOLO(args.pose_model)
