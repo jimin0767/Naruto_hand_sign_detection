@@ -18,9 +18,16 @@ from handsign.effects import (
     AnchorTracker,
     CloneEffect,
     CloneSpec,
+    EarthDragonEffect,
+    EarthDragonSpec,
     FlameBreathEffect,
     FlameSpec,
+    VacuumWaveEffect,
+    VacuumWaveSpec,
+    WaterBulletEffect,
+    WaterBulletSpec,
     fire_lut,
+    water_lut,
     EffectSpec,
     TransformEffect,
     TransformSpec,
@@ -796,16 +803,6 @@ class TestFlameBreath:
             assert 0.0 <= fx.intensity(float(t)) <= 1.0
 
 
-class TestAllEffectsRegistered:
-    def test_four_jutsu_have_effects(self):
-        assert set(EFFECTS) == {"Chidori", "Transformation Jutsu",
-                                "Clone Jutsu", "Dragon Flame Jutsu"}
-
-    def test_each_uses_a_distinct_spec_type(self):
-        kinds = {type(v).__name__ for v in EFFECTS.values()}
-        assert kinds == {"EffectSpec", "TransformSpec", "CloneSpec", "FlameSpec"}
-
-
 class TestFlameShape:
     """The reference is a narrow neck at the lips flaring into a billowing mass."""
 
@@ -875,3 +872,183 @@ class TestFlameShape:
         # Well behind the lips -- immediately behind is legitimately lit by blur spill.
         behind = frame[110:190, 60:150]
         assert behind.max() < 250, "core is blowing out the caster's face"
+
+
+def _advance(fx, frame, until, mouth=(200.0, 150.0), dt=1 / 30):
+    """Advance an effect, compositing onto a FRESH frame each step.
+
+    Reusing one canvas accumulates every frame of an additive effect, which makes a
+    modest plume look like a blown-out beam -- an artifact that cost real tuning time.
+    """
+    out = frame
+    t = 0.0
+    while t < until:
+        t += dt
+        out = frame.copy()
+        fx.draw(out, mouth, 0.0, t)
+    return out
+
+
+class TestWaterBullet:
+    @pytest.fixture
+    def fx(self):
+        return WaterBulletEffect(WaterBulletSpec(), seed=0)
+
+    def test_fires_the_whole_volley(self, fx, frame):
+        s = WaterBulletSpec()
+        _advance(fx, frame, s.interval * s.shots + 0.1)
+        assert fx.fired == s.shots
+
+    def test_shots_are_staggered_not_simultaneous(self, fx, frame):
+        _advance(fx, frame, WaterBulletSpec().interval * 0.5)
+        assert fx.fired == 1, "the volley fired at once; the gap is what reads as rounds"
+
+    def test_bullets_travel_away_from_the_mouth(self, fx, frame):
+        _advance(fx, frame, 0.8, mouth=(120.0, 150.0))
+        assert fx.bullets and max(b["pos"][0] for b in fx.bullets) > 200.0
+
+    def test_droplets_are_capped(self, fx, frame):
+        _advance(fx, frame, 2.0)
+        assert len(fx.droplets) <= 700
+
+    def test_water_is_blue_dominant(self, fx, frame):
+        out = _advance(fx, frame, 0.9, mouth=(120.0, 150.0))
+        lit = out[out.max(axis=2) > 90]
+        assert len(lit) > 0 and lit[:, 0].mean() > lit[:, 2].mean()
+
+    def test_aims_with_head_yaw(self, frame):
+        right = WaterBulletEffect(WaterBulletSpec(), seed=1)
+        right.yaw = 1.0
+        left = WaterBulletEffect(WaterBulletSpec(), seed=1)
+        left.yaw = -1.0
+        a = _advance(right, frame, 0.9, mouth=(320.0, 150.0))
+        b = _advance(left, frame, 0.9, mouth=(320.0, 150.0))
+        assert a[:, 380:].mean() > a[:, :260].mean()
+        assert b[:, :260].mean() > b[:, 380:].mean()
+
+    def test_water_lut_shape_and_ends(self):
+        lut = water_lut()
+        assert lut.shape == (256, 1, 3)
+        assert lut[0, 0].tolist() == [0, 0, 0]
+        assert lut[255, 0].tolist() == [255, 255, 255]
+
+    @pytest.mark.parametrize("mouth", [(0.0, 0.0), (639.0, 359.0), (-60.0, 180.0)])
+    def test_offscreen_mouth_is_safe(self, fx, frame, mouth):
+        _advance(fx, frame, 0.6, mouth=mouth)
+
+
+class TestEarthDragon:
+    @pytest.fixture
+    def fx(self):
+        return EarthDragonEffect(EarthDragonSpec(), seed=0)
+
+    def test_lunge_grows_then_saturates(self, fx):
+        assert fx.extent(0.1) < fx.extent(0.4) < fx.extent(0.7)
+        assert fx.extent(2.0) == 1.0
+
+    def test_head_grows_as_it_lunges(self, fx):
+        small = fx.head_pose((300.0, 200.0), (960, 720), 0.1)[2]
+        big = fx.head_pose((300.0, 200.0), (960, 720), 1.0)[2]
+        assert big > small
+
+    def test_head_stays_a_sane_size(self, fx):
+        """The roughen jitter is in LOCAL units; a pixel magnitude there explodes the
+        polygon until it swallows the frame."""
+        _, _, scale, _ = fx.head_pose((300.0, 200.0), (960, 720), 1.0)
+        assert 100 < scale < 500
+
+    def test_earth_occludes_rather_than_glows(self, frame):
+        """Additive compositing makes rock look like a glowing ghost; earth must darken
+        some pixels, which additive blending can never do."""
+        fx = EarthDragonEffect(EarthDragonSpec(), seed=2)
+        frame[:] = 240
+        out = _advance(fx, frame, 0.9, mouth=(300.0, 160.0))
+        assert out.min() < 200, "nothing was darkened, so this is compositing additively"
+
+    def test_earth_is_warm_brown(self, frame):
+        fx = EarthDragonEffect(EarthDragonSpec(), seed=3)
+        out = _advance(fx, frame, 0.9, mouth=(300.0, 160.0))
+        changed = out[np.abs(out.astype(int) - frame.astype(int)).max(axis=2) > 20]
+        assert len(changed) > 0 and changed[:, 2].mean() > changed[:, 0].mean()
+
+    def test_nothing_before_or_after(self, fx, frame):
+        for age in (0.0, 99.0):
+            copy = frame.copy()
+            fx.draw(copy, (300.0, 160.0), 0.0, age)
+            assert np.array_equal(copy, frame), f"drew at age {age}"
+
+    @pytest.mark.parametrize("mouth", [(0.0, 0.0), (639.0, 359.0), (-60.0, 180.0)])
+    def test_offscreen_mouth_is_safe(self, fx, frame, mouth):
+        _advance(fx, frame, 0.6, mouth=mouth)
+
+
+class TestVacuumWave:
+    @pytest.fixture
+    def fx(self):
+        return VacuumWaveEffect(VacuumWaveSpec(), seed=0)
+
+    def test_blades_launch_on_a_stagger(self, fx):
+        s = VacuumWaveSpec()
+        assert len(fx.blade_state(0.01)) == 1
+        assert len(fx.blade_state(s.interval * 3 + 0.01)) == 4
+
+    def test_blades_expand_over_time(self, fx):
+        assert fx.blade_state(0.5)[0][0] > fx.blade_state(0.1)[0][0]
+
+    def test_blades_retire_once_spent(self, fx):
+        assert all(travel <= 1.35 for travel, _ in fx.blade_state(3.0))
+
+    def test_draw_brightens_the_frame(self, fx, frame):
+        before = frame.mean()
+        out = _advance(fx, frame, 0.8)
+        assert out.mean() > before
+
+    def test_wind_reads_pale_not_coloured(self, fx, frame):
+        out = _advance(fx, frame, 0.8)
+        lit = out[out.max(axis=2) > 120]
+        assert len(lit) > 0
+        spread = abs(float(lit[:, 0].mean()) - float(lit[:, 2].mean()))
+        assert spread < 90, "blades are too strongly tinted to read as air"
+
+    def test_aims_with_head_yaw(self, frame):
+        right = VacuumWaveEffect(VacuumWaveSpec(), seed=1)
+        right.yaw = 1.0
+        left = VacuumWaveEffect(VacuumWaveSpec(), seed=1)
+        left.yaw = -1.0
+        a = _advance(right, frame, 0.7, mouth=(320.0, 180.0))
+        b = _advance(left, frame, 0.7, mouth=(320.0, 180.0))
+        assert a[:, 400:].mean() > a[:, :240].mean()
+        assert b[:, :240].mean() > b[:, 400:].mean()
+
+    def test_nothing_after_expiry(self, fx, frame):
+        copy = frame.copy()
+        fx.draw(copy, (320.0, 180.0), 0.0, 99.0)
+        assert np.array_equal(copy, frame)
+
+    @pytest.mark.parametrize("mouth", [(0.0, 0.0), (639.0, 359.0), (-60.0, 180.0)])
+    def test_offscreen_mouth_is_safe(self, fx, frame, mouth):
+        _advance(fx, frame, 0.6, mouth=mouth)
+
+
+class TestSevenEffectsRegistered:
+    def test_every_jutsu_with_an_effect(self):
+        assert set(EFFECTS) == {
+            "Chidori", "Transformation Jutsu", "Clone Jutsu", "Dragon Flame Jutsu",
+            "Water Bullet Jutsu", "Earth Dragon Bullet", "Vacuum Wave",
+        }
+
+    def test_each_spec_type_is_distinct(self):
+        kinds = {type(v).__name__ for v in EFFECTS.values()}
+        assert kinds == {"EffectSpec", "TransformSpec", "CloneSpec", "FlameSpec",
+                         "WaterBulletSpec", "EarthDragonSpec", "VacuumWaveSpec"}
+
+    def test_all_mouth_effects_accept_yaw(self):
+        """The demo drives all four the same way; a missing set_yaw crashes mid-cast."""
+        for cls, spec in ((FlameBreathEffect, FlameSpec()),
+                          (WaterBulletEffect, WaterBulletSpec()),
+                          (EarthDragonEffect, EarthDragonSpec()),
+                          (VacuumWaveEffect, VacuumWaveSpec())):
+            fx = cls(spec, seed=0)
+            fx.set_yaw(0.5)
+            fx.set_yaw(None)
+            assert hasattr(fx, "yaw")

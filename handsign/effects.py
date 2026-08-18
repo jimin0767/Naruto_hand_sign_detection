@@ -615,7 +615,7 @@ class FlameSpec:
     spread: float = 0.20           # launch cone half-angle; the flare comes mostly
                                    # from `bloom`, not from spraying wide at the mouth
     yaw_swing: float = 1.15        # radians of aim at full head yaw
-    rate: int = 620                # particles per SECOND; must stay under
+    rate: int = 700                # particles per SECOND; must stay under
                                    # max_particles/life or the cap truncates the
                                    # oldest particles, which are the jet's far end
     life: float = 0.95             # particle lifetime, seconds
@@ -628,7 +628,7 @@ class FlameSpec:
     bloom: float = 1.50            # lateral spreading force, grows with age
     detail: float = 0.80           # how hard the noise texture breaks up the field
     size: float = 0.062            # particle radius at death, fraction of frame width
-    max_particles: int = 620
+    max_particles: int = 720
     standoff: float = 0.055        # spawn this far forward of the lips, as a fraction of
                                    # frame width, so the neck clears the caster's face
 
@@ -814,7 +814,7 @@ class FlameBreathEffect:
             # the gradient has to be built up by accumulation.
             # Young particles run much hotter, which gives a bright neck at the mouth
             # that cools along the plume -- the gradient real fire has.
-            value = float(float(hot) * 0.40 * (1.0 - t) ** 1.1 * level)
+            value = float(float(hot) * 0.78 * (1.0 - t) ** 1.1 * level)
             cv2.circle(heat, (int(x * scale), int(y * scale)), radius_px, value, -1)
 
         # The ignition point. Small and pushed forward of the lips on purpose: a large
@@ -844,6 +844,423 @@ class FlameBreathEffect:
         return frame
 
 
+# Dragon head in local coordinates, reused by the earth dragon: snout along +x, size 1.0 from hinge to nose tip,
+# +y downward. Everything is defined once here and then rotated, scaled and translated,
+# which keeps the drawing code free of trigonometry.
+_SKULL = [
+    (-0.42, -0.30), (-0.22, -0.52), (0.16, -0.55), (0.52, -0.46),
+    (0.86, -0.30), (1.02, -0.12), (0.98, 0.02), (0.60, 0.06),
+    (0.10, 0.10), (-0.34, 0.06),
+]
+_LOWER_JAW = [
+    (-0.30, 0.10), (0.12, 0.22), (0.56, 0.34), (0.86, 0.46),
+    (0.80, 0.58), (0.44, 0.52), (0.02, 0.38), (-0.32, 0.24),
+]
+_UPPER_TEETH = [(0.86, 0.02), (0.62, 0.02), (0.38, 0.04), (0.16, 0.07)]
+_LOWER_TEETH = [(0.78, 0.42), (0.54, 0.32), (0.30, 0.24), (0.08, 0.18)]
+_HORNS = [
+    ((-0.10, -0.50), (-0.78, -0.86)),
+    ((0.22, -0.54), (-0.34, -1.02)),
+    ((-0.30, -0.34), (-0.98, -0.48)),
+]
+_EYE = (0.46, -0.26)
+
+
+def _place(points, origin, angle, scale, flip):
+    """Rotate/scale/translate local head coordinates into frame pixels."""
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    out = []
+    for x, y in points:
+        x = x * flip
+        out.append((origin[0] + (x * cos_a - y * sin_a) * scale,
+                    origin[1] + (x * sin_a + y * cos_a) * scale))
+    return out
+
+
+# --------------------------------------------------------------------------------------
+# Water bullet (high-pressure spheres of water spat from the mouth)
+# --------------------------------------------------------------------------------------
+
+def water_lut() -> np.ndarray:
+    """256-entry BGR ramp for water: black to deep blue to cyan to white."""
+    stops = [
+        (0.00, (0, 0, 0)),
+        (0.16, (70, 12, 0)),
+        (0.34, (160, 55, 6)),
+        (0.54, (225, 120, 30)),
+        (0.74, (255, 200, 120)),
+        (1.00, (255, 255, 255)),
+    ]
+    lut = np.zeros((256, 1, 3), np.uint8)
+    for i in range(256):
+        t = i / 255.0
+        for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
+            if t0 <= t <= t1:
+                k = (t - t0) / max(t1 - t0, 1e-6)
+                lut[i, 0] = [int(c0[j] + (c1[j] - c0[j]) * k) for j in range(3)]
+                break
+    return lut
+
+
+_WATER_LUT = water_lut()
+
+
+@dataclass
+class WaterBulletSpec:
+    """Timing and behaviour for a volley of water bullets."""
+    duration: float = 4.5
+    fade: float = 0.5
+    shots: int = 4                 # bullets in the volley
+    interval: float = 0.42         # seconds between shots
+    speed: float = 0.95            # frame widths per second
+    size: float = 0.105            # bullet radius as a fraction of frame width
+    spray: int = 22                # trailing droplets spawned per shot per second
+    spray_life: float = 0.26
+    yaw_swing: float = 1.15
+
+
+class WaterBulletEffect:
+    """A volley of compressed water spheres, each dragging a spray tail.
+
+    A single sphere reads as a thrown ball; the source fires several in quick succession,
+    and it is the repetition that makes it read as a *bullet* technique. Each shot is a
+    dense leading sphere plus droplets shed behind it, accumulated into one field so the
+    tail blends into the head instead of looking like beads on a string.
+    """
+
+    def __init__(self, spec: WaterBulletSpec, seed: int | None = None):
+        self.spec = spec
+        self.rng = np.random.default_rng(seed)
+        self.yaw = 0.0
+        self.last_time: float | None = None
+        self.fired = 0
+        # Columns: x, y, vx, vy, age, scale
+        self.droplets = np.zeros((0, 6), np.float32)
+        self.bullets: list[dict] = []
+
+    def set_yaw(self, yaw: float | None) -> None:
+        if yaw is not None:
+            self.yaw += (yaw - self.yaw) * 0.3
+
+    def aim(self) -> float:
+        turn = max(-1.0, min(1.0, self.yaw))
+        if turn >= 0:
+            return turn * self.spec.yaw_swing * 0.5
+        return math.pi - abs(turn) * self.spec.yaw_swing * 0.5
+
+    def intensity(self, age: float) -> float:
+        s = self.spec
+        if age < 0 or age > s.duration:
+            return 0.0
+        if age > s.duration - s.fade:
+            return max(0.0, (s.duration - age) / s.fade)
+        return 1.0
+
+    def draw(self, frame, centre, radius, age):
+        s = self.spec
+        level = self.intensity(age)
+        height, width = frame.shape[:2]
+        dt = 1 / 30 if self.last_time is None else min(0.1, max(1e-3, age - self.last_time))
+        self.last_time = age
+
+        angle = self.aim()
+        # Fire on a schedule rather than all at once: the gap between shots is what makes
+        # a volley legible as separate rounds.
+        while self.fired < s.shots and age >= self.fired * s.interval and level > 0:
+            self.bullets.append({"pos": [centre[0], centre[1]], "born": age})
+            self.fired += 1
+
+        alive = []
+        for b in self.bullets:
+            b["pos"][0] += math.cos(angle) * s.speed * width * dt
+            b["pos"][1] += math.sin(angle) * s.speed * width * dt
+            if -width * 0.3 < b["pos"][0] < width * 1.3:
+                alive.append(b)
+                # Shed droplets behind the head, which is what gives the shot a tail.
+                n = max(1, int(s.spray * dt * 30))
+                new = np.zeros((n, 6), np.float32)
+                new[:, 0] = b["pos"][0] + self.rng.normal(0, width * 0.012, n)
+                new[:, 1] = b["pos"][1] + self.rng.normal(0, width * 0.012, n)
+                new[:, 2] = -math.cos(angle) * width * 0.22 + self.rng.normal(0, width * 0.10, n)
+                new[:, 3] = -math.sin(angle) * width * 0.22 + self.rng.normal(0, width * 0.10, n)
+                new[:, 5] = self.rng.uniform(0.35, 0.9, n)
+                self.droplets = np.vstack([self.droplets, new])[-700:]
+        self.bullets = alive
+
+        if len(self.droplets):
+            d = self.droplets
+            d[:, 0] += d[:, 2] * dt
+            d[:, 1] += d[:, 3] * dt
+            d[:, 3] += width * 0.30 * dt          # droplets fall
+            d[:, 4] += dt
+            self.droplets = d[d[:, 4] < s.spray_life]
+
+        if not self.bullets and not len(self.droplets):
+            return frame
+
+        scale = 0.5
+        hh, hw = int(height * scale), int(width * scale)
+        field = np.zeros((hh, hw), np.float32)
+        head_r = s.size * width * scale
+
+        for x, y, _, _, born, size in self.droplets:
+            t = float(born) / s.spray_life
+            cv2.circle(field, (int(x * scale), int(y * scale)),
+                       max(1, int(head_r * 0.34 * float(size))),
+                       float(0.42 * (1.0 - t) * level), -1)
+        for b in self.bullets:
+            travel = min(1.0, (age - b["born"]) * 2.2)
+            cv2.circle(field, (int(b["pos"][0] * scale), int(b["pos"][1] * scale)),
+                       max(2, int(head_r * (0.6 + 0.4 * travel))), float(level), -1)
+
+        field = cv2.GaussianBlur(field, (0, 0), max(1.5, head_r * 0.28))
+        field = np.clip(field, 0.0, 1.0)
+        coloured = cv2.applyColorMap((field * 255).astype(np.uint8), _WATER_LUT)
+        coloured = (coloured * field[:, :, None]).astype(np.uint8)
+        frame[:] = cv2.add(frame, cv2.resize(coloured, (width, height)))
+        return frame
+
+
+# --------------------------------------------------------------------------------------
+# Earth dragon (a dragon head of packed earth that lunges from the mouth)
+# --------------------------------------------------------------------------------------
+
+@dataclass
+class EarthDragonSpec:
+    """Shape and timing for the earth dragon head."""
+    duration: float = 5.0
+    lunge: float = 0.7             # seconds to reach full extension
+    fade: float = 0.7
+    size: float = 0.34             # head extent as a fraction of frame width
+    reach: float = 0.17            # distance travelled from the mouth
+    jaw: float = 0.40
+    dust: int = 22
+    yaw_swing: float = 1.15
+    body: tuple[int, int, int] = (58, 96, 132)     # BGR packed earth
+    lit: tuple[int, int, int] = (96, 148, 188)     # sunlit faces
+    shade: tuple[int, int, int] = (30, 52, 76)     # crevices
+    grit: tuple[int, int, int] = (120, 165, 200)   # airborne dust
+
+
+class EarthDragonEffect:
+    """A dragon head of packed earth, lunging out along the caster's aim.
+
+    Reuses the head geometry from the fire dragon but composites it **opaquely** rather
+    than additively. That is the whole difference between earth and fire: additive
+    blending makes anything look like it emits light, so rock rendered that way reads as
+    a glowing ghost. Earth has to occlude.
+    """
+
+    def __init__(self, spec: EarthDragonSpec, seed: int | None = None):
+        self.spec = spec
+        self.rng = np.random.default_rng(seed)
+        self.yaw = 0.0
+
+    def set_yaw(self, yaw: float | None) -> None:
+        if yaw is not None:
+            self.yaw += (yaw - self.yaw) * 0.3
+
+    def intensity(self, age: float) -> float:
+        s = self.spec
+        if age < 0 or age > s.duration:
+            return 0.0
+        if age > s.duration - s.fade:
+            return max(0.0, (s.duration - age) / s.fade)
+        return 1.0
+
+    def extent(self, age: float) -> float:
+        t = min(1.0, max(0.0, age) / max(self.spec.lunge, 1e-6))
+        return t * t * (3 - 2 * t)
+
+    def head_pose(self, mouth, frame_size, age):
+        s = self.spec
+        width, _ = frame_size
+        grow = self.extent(age)
+        angle = self.yaw * s.yaw_swing * 0.28
+        scale = s.size * width * (0.30 + 0.70 * grow)
+        flip = 1.0 if self.yaw >= 0 else -1.0
+        reach = s.reach * width * grow * flip
+        origin = (mouth[0] + reach, mouth[1] + scale * 0.30)
+        return origin, angle, scale, flip
+
+    def draw(self, frame, centre, radius, age):
+        s = self.spec
+        level = self.intensity(age)
+        if level <= 0.01 or self.extent(age) <= 0.02:
+            return frame
+        height, width = frame.shape[:2]
+        origin, angle, scale, flip = self.head_pose(centre, (width, height), age)
+        jaw_drop = s.jaw * (0.3 + 0.7 * self.extent(age))
+
+        # A full-frame layer plus mask is the entire cost of this effect; the head only
+        # ever covers a fraction of the frame.
+        layer = np.zeros((height, width, 3), np.uint8)
+        mask = np.zeros((height, width), np.uint8)
+
+        def fill(points, colour, target_mask=True):
+            poly = np.array(points, np.int32)
+            cv2.fillPoly(layer, [poly], colour, cv2.LINE_AA)
+            if target_mask:
+                cv2.fillPoly(mask, [poly], 255, cv2.LINE_AA)
+
+        # Jagged silhouette: a smooth outline reads as clay, not rock. The jitter is in
+        # LOCAL units (the head spans about 1.0), not pixels -- using a pixel magnitude
+        # here multiplies by `scale` again and the polygon swallows the frame.
+        def roughen(points, sigma=0.03):
+            return [(x + self.rng.normal(0, sigma), y + self.rng.normal(0, sigma))
+                    for x, y in points]
+
+        skull = _place(roughen(_SKULL), origin, angle, scale, flip)
+        jaw_local = _place(_LOWER_JAW, (0.0, 0.0), jaw_drop, 1.0, 1.0)
+        jaw = _place(roughen(jaw_local), origin, angle, scale, flip)
+        fill(skull, s.body)
+        fill(jaw, s.body)
+
+        for base, tip in _HORNS:
+            a, b = _place([base, tip], origin, angle, scale, flip)
+            cv2.line(layer, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
+                     s.body, max(2, int(scale * 0.075)), cv2.LINE_AA)
+            cv2.line(mask, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
+                     255, max(2, int(scale * 0.075)), cv2.LINE_AA)
+
+        # Strata: horizontal bands of lighter and darker earth across the skull.
+        for i in range(7):
+            t = -0.5 + i * 0.16
+            a, b = _place([(-0.40, t), (1.00, t)], origin, angle, scale, flip)
+            colour = s.lit if i % 2 else s.shade
+            cv2.line(layer, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
+                     colour, max(1, int(scale * 0.028)), cv2.LINE_AA)
+
+        for (tx, ty), depth in zip(_UPPER_TEETH, (0.10, 0.12, 0.11, 0.09)):
+            fill(_place([(tx, ty), (tx - 0.07, ty), (tx - 0.035, ty + depth)],
+                        origin, angle, scale, flip), s.lit)
+        for (tx, ty), depth in zip(_place(_LOWER_TEETH, (0.0, 0.0), jaw_drop, 1.0, 1.0),
+                                   (0.10, 0.11, 0.10, 0.08)):
+            fill(_place([(tx, ty), (tx - 0.07, ty), (tx - 0.035, ty - depth)],
+                        origin, angle, scale, flip), s.lit)
+
+        eye = _place([_EYE], origin, angle, scale, flip)[0]
+        cv2.circle(layer, (int(eye[0]), int(eye[1])), max(2, int(scale * 0.055)),
+                   s.shade, -1, cv2.LINE_AA)
+
+        # Opaque composite: rock occludes, it does not glow.
+        alpha = (cv2.GaussianBlur(mask, (0, 0), 1.2).astype(np.float32) / 255.0) * level
+        frame[:] = (layer * alpha[:, :, None] + frame * (1 - alpha[:, :, None])).astype(np.uint8)
+
+        # Dust thrown off the head, drawn after so it reads as airborne grit.
+        for _ in range(s.dust):
+            a = self.rng.uniform(0, 2 * math.pi)
+            d = self.rng.uniform(0.3, 1.5) * scale
+            px, py = int(origin[0] + math.cos(a) * d), int(origin[1] + math.sin(a) * d)
+            cv2.circle(frame, (px, py), max(1, int(scale * self.rng.uniform(0.01, 0.05))),
+                       s.grit, -1, cv2.LINE_AA)
+        return frame
+
+
+# --------------------------------------------------------------------------------------
+# Vacuum wave (crescent blades of compressed air)
+# --------------------------------------------------------------------------------------
+
+@dataclass
+class VacuumWaveSpec:
+    """Timing and shape for the wind blades."""
+    duration: float = 4.0
+    fade: float = 0.5
+    blades: int = 6
+    interval: float = 0.34         # seconds between blades
+    speed: float = 1.15            # frame widths per second
+    arc: float = 62.0              # crescent half-span, degrees
+    thickness: float = 0.016       # blade thickness as a fraction of frame width
+    yaw_swing: float = 1.15
+    edge: tuple[int, int, int] = (255, 238, 205)   # BGR pale cyan-white
+    haze: tuple[int, int, int] = (180, 130, 60)    # faint blue wash behind it
+
+
+class VacuumWaveEffect:
+    """Crescent blades of compressed air, launched along the caster's aim.
+
+    Wind is invisible, so the effect has to be its edge: thin bright crescents that
+    expand and thin out as they travel, plus a faint wash behind them. Drawing it as a
+    solid body would read as water or gas rather than a pressure wave.
+    """
+
+    def __init__(self, spec: VacuumWaveSpec, seed: int | None = None):
+        self.spec = spec
+        self.rng = np.random.default_rng(seed)
+        self.yaw = 0.0
+
+    def set_yaw(self, yaw: float | None) -> None:
+        if yaw is not None:
+            self.yaw += (yaw - self.yaw) * 0.3
+
+    def aim(self) -> float:
+        turn = max(-1.0, min(1.0, self.yaw))
+        if turn >= 0:
+            return turn * self.spec.yaw_swing * 0.5
+        return math.pi - abs(turn) * self.spec.yaw_swing * 0.5
+
+    def intensity(self, age: float) -> float:
+        s = self.spec
+        if age < 0 or age > s.duration:
+            return 0.0
+        if age > s.duration - s.fade:
+            return max(0.0, (s.duration - age) / s.fade)
+        return 1.0
+
+    def blade_state(self, age):
+        """(travel 0..1, index) for each blade currently in flight."""
+        s = self.spec
+        out = []
+        for i in range(s.blades):
+            born = i * s.interval
+            if age < born:
+                continue
+            travel = (age - born) * s.speed
+            if travel <= 1.35:
+                out.append((travel, i))
+        return out
+
+    def draw(self, frame, centre, radius, age):
+        s = self.spec
+        level = self.intensity(age)
+        if level <= 0.01:
+            return frame
+        height, width = frame.shape[:2]
+        angle = self.aim()
+        deg = math.degrees(angle)
+
+        layer = np.zeros_like(frame)
+        for travel, i in self.blade_state(age):
+            r = int(travel * width * 0.62)
+            if r < 6:
+                continue
+            # Thins and dims as it expands: a blade that keeps its weight looks like a
+            # ring, not a wave losing pressure.
+            decay = max(0.0, 1.0 - travel / 1.35)
+            thick = max(1, int(s.thickness * width * decay))
+            span = s.arc * (0.65 + 0.35 * decay)
+            centre_i = (int(centre[0]), int(centre[1]))
+
+            cv2.ellipse(layer, centre_i, (r, int(r * 0.86)), deg,
+                        -span, span, tuple(int(c * level * decay * 0.22) for c in s.haze),
+                        max(2, thick * 3), cv2.LINE_AA)
+            cv2.ellipse(layer, centre_i, (r, int(r * 0.86)), deg,
+                        -span, span, tuple(int(c * level * decay) for c in s.edge),
+                        thick, cv2.LINE_AA)
+            # A few slipstream ticks riding the blade, for a sense of speed.
+            for _ in range(4):
+                a = math.radians(deg + self.rng.uniform(-span, span))
+                px = centre[0] + math.cos(a) * r
+                py = centre[1] + math.sin(a) * r * 0.86
+                back = self.rng.uniform(0.05, 0.16) * width * decay
+                cv2.line(layer, (int(px), int(py)),
+                         (int(px - math.cos(a) * back), int(py - math.sin(a) * back * 0.86)),
+                         tuple(int(c * level * decay * 0.8) for c in s.edge), 1, cv2.LINE_AA)
+
+        frame[:] = cv2.add(frame, cv2.GaussianBlur(layer, (0, 0), 1.6))
+        return frame
+
+
 # --------------------------------------------------------------------------------------
 # Registry -- last in the file so every spec class above is already defined.
 # --------------------------------------------------------------------------------------
@@ -851,10 +1268,16 @@ class FlameBreathEffect:
 TRANSFORMATION = TransformSpec(duration=6.0, smoke_s=0.55, scale=1.3)
 CLONE = CloneSpec(duration=6.0, count=6)
 DRAGON_FLAME = FlameSpec()
+WATER_BULLET = WaterBulletSpec()
+EARTH_DRAGON = EarthDragonSpec()
+VACUUM_WAVE = VacuumWaveSpec()
 
 EFFECTS.update({
     "Chidori": CHIDORI,
     "Transformation Jutsu": TRANSFORMATION,
     "Clone Jutsu": CLONE,
     "Dragon Flame Jutsu": DRAGON_FLAME,
+    "Water Bullet Jutsu": WATER_BULLET,
+    "Earth Dragon Bullet": EARTH_DRAGON,
+    "Vacuum Wave": VACUUM_WAVE,
 })

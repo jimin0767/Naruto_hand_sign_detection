@@ -47,6 +47,9 @@ Weights are **not** in this repo — download `best.pt` (and `best.onnx`) from t
 | **Smoke, then a character** | Transformation Jutsu, tracking your whole body for 6 s |
 | **A crowd of you** | Clone Jutsu, six copies mirroring your movement for 6 s |
 | **Fire from your mouth** | Dragon Flame Jutsu, a jet of flame for 5 s, aimed by your head |
+| **Water spheres** | Water Bullet Jutsu, a volley of four pressurised rounds |
+| **An earthen dragon head** | Earth Dragon Bullet, lunging out along your aim |
+| **Crescent wind blades** | Vacuum Wave, six expanding pressure waves |
 
 **If a sign will not commit,** watch the brackets and the stability bar. Grey brackets mean
 the model sees the sign but is not confident enough to count it — the bar stalls partway
@@ -214,9 +217,28 @@ If you raise `rate` or `life` in `FlameSpec`, keep `rate * life` under `max_part
 The cap discards the *oldest* particles, which are the far end of the jet, so exceeding it
 silently shortens the flame no matter what `reach` says.
 
+**Water Bullet Jutsu** fires a volley of four pressurised spheres, each shedding a spray
+tail. The stagger between shots is what makes it read as rounds rather than one thrown
+ball. Same heat-field technique as the flame, through a blue-to-white ramp.
+
+**Earth Dragon Bullet** lunges a dragon head of packed earth out along your aim — the head
+geometry is shared with the old fire dragon, but composited **opaquely** rather than
+additively. That is the whole difference between earth and fire: additive blending makes
+anything look like it emits light, so rock rendered that way reads as a glowing ghost.
+Earth has to occlude.
+
+**Vacuum Wave** launches six crescent blades of compressed air. Wind is invisible, so the
+effect is its edge: thin bright arcs that thin and dim as they expand, with a faint wash
+behind. Drawing it as a solid body would read as water or gas rather than pressure.
+
 Add more in `handsign/effects.py` — `EFFECTS` maps a jutsu name to an `EffectSpec`
-(procedural), `TransformSpec` (sprite), `CloneSpec` (segmentation), or `DragonSpec`. A name
-that does not match the jutsu table is caught by tests.
+(procedural), `TransformSpec` (sprite), `CloneSpec` (segmentation), `FlameSpec`,
+`WaterBulletSpec`, `EarthDragonSpec`, or `VacuumWaveSpec`. A name that does not match the
+jutsu table is caught by tests.
+
+**Testing effects:** composite onto a *fresh* frame each step, as the demo does. Reusing
+one canvas accumulates every frame of an additive effect, which makes a modest plume look
+like a blown-out beam — an artifact that cost real tuning time here.
 
 `load_jutsu` rejects any sign the model cannot detect, and warns if a jutsu is
 **unreachable** — a shorter jutsu completing partway through a longer one clears the

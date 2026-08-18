@@ -40,8 +40,14 @@ from handsign.effects import (
     AnchorTracker,
     CloneEffect,
     CloneSpec,
+    EarthDragonEffect,
+    EarthDragonSpec,
     FlameBreathEffect,
     FlameSpec,
+    VacuumWaveEffect,
+    VacuumWaveSpec,
+    WaterBulletEffect,
+    WaterBulletSpec,
     estimate_yaw,
     LightningEffect,
     TransformEffect,
@@ -215,22 +221,27 @@ def main() -> int:
                                     person_model = YOLO(args.person_model)
                                 person_anchor.reset()
                                 effect, effect_at = TransformEffect(spec, sprite), now
-                        elif isinstance(spec, FlameSpec):
+                        elif isinstance(spec, (FlameSpec, WaterBulletSpec,
+                                               EarthDragonSpec, VacuumWaveSpec)):
                             if args.effect_seconds:
                                 spec = replace(spec, duration=args.effect_seconds)
-                            if args.flame_reach:
+                            if args.flame_reach and isinstance(spec, FlameSpec):
                                 spec = replace(spec, reach=args.flame_reach)
-                            if args.flame_spread:
+                            if args.flame_spread and isinstance(spec, FlameSpec):
                                 spec = replace(spec, spread=args.flame_spread)
-                            if args.flame_size:
+                            if args.flame_size and isinstance(spec, FlameSpec):
                                 spec = replace(spec, size=args.flame_size)
-                            if args.flame_bloom:
+                            if args.flame_bloom and isinstance(spec, FlameSpec):
                                 spec = replace(spec, bloom=args.flame_bloom)
                             if pose_model is None:
                                 from ultralytics import YOLO
                                 pose_model = YOLO(args.pose_model)
                             mouth_anchor.reset()
-                            effect, effect_at = FlameBreathEffect(spec), now
+                            builder = {FlameSpec: FlameBreathEffect,
+                                       WaterBulletSpec: WaterBulletEffect,
+                                       EarthDragonSpec: EarthDragonEffect,
+                                       VacuumWaveSpec: VacuumWaveEffect}[type(spec)]
+                            effect, effect_at = builder(spec), now
                         elif isinstance(spec, CloneSpec):
                             if args.effect_seconds:
                                 spec = replace(spec, duration=args.effect_seconds)
@@ -280,7 +291,8 @@ def main() -> int:
                 if now - effect_at > effect.spec.duration:
                     effect = None
                 else:
-                    if isinstance(effect, FlameBreathEffect):
+                    if isinstance(effect, (FlameBreathEffect, WaterBulletEffect,
+                                          EarthDragonEffect, VacuumWaveEffect)):
                         # COCO pose gives a nose keypoint; the mouth sits a little below
                         # it, scaled by the eye separation so it holds at any distance.
                         pk = pose_model.predict(frame, conf=0.35, verbose=False,
