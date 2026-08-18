@@ -18,8 +18,9 @@ from handsign.effects import (
     AnchorTracker,
     CloneEffect,
     CloneSpec,
-    DragonFireEffect,
-    DragonSpec,
+    FlameBreathEffect,
+    FlameSpec,
+    fire_lut,
     EffectSpec,
     TransformEffect,
     TransformSpec,
@@ -658,35 +659,72 @@ class TestEstimateYaw:
         assert estimate_yaw(self.kp(100.0, 100.0, 100.0)) is None
 
 
-class TestDragonFire:
+class TestFireLut:
+    def test_shape_is_what_applycolormap_wants(self):
+        """cv2.applyColorMap rejects a (256, 3) table; it must be (256, 1, 3)."""
+        assert fire_lut().shape == (256, 1, 3)
+
+    def test_runs_from_black_to_white(self):
+        lut = fire_lut()
+        assert lut[0, 0].tolist() == [0, 0, 0]
+        assert lut[255, 0].tolist() == [255, 255, 255]
+
+    def test_is_warm_through_the_middle(self):
+        """A cool midtone would make Fire Style read as gas-flame blue."""
+        mid = fire_lut()[128, 0]
+        assert mid[2] > mid[0], f"midtone is not red-dominant: {mid.tolist()}"
+
+    def test_brightness_increases_monotonically(self):
+        lum = fire_lut()[:, 0].astype(int).sum(axis=1)
+        assert all(b >= a - 2 for a, b in zip(lum, lum[1:]))
+
+
+class TestFlameBreath:
     @pytest.fixture
     def fx(self):
-        return DragonFireEffect(DragonSpec(), seed=0)
+        return FlameBreathEffect(FlameSpec(), seed=0)
 
-    def test_head_grows_from_the_mouth(self, fx):
-        small = fx.head_pose((300.0, 200.0), (960, 540), 0.1)[2]
-        big = fx.head_pose((300.0, 200.0), (960, 540), 1.0)[2]
-        assert small < big
+    def step(self, fx, frame, until, mouth=(250.0, 150.0), dt=1 / 30):
+        t = 0.0
+        while t < until:
+            t += dt
+            fx.draw(frame, mouth, 0.0, t)
+        return frame
 
-    def test_growth_saturates(self, fx):
-        assert fx.extent(0.45) == pytest.approx(1.0)
-        assert fx.extent(4.0) == 1.0
+    def test_particles_accumulate_then_settle(self, fx, frame):
+        self.step(fx, frame, 0.3)
+        early = len(fx.particles)
+        self.step(fx, frame, 1.5)
+        assert early > 0 and len(fx.particles) >= early
 
-    def test_head_sits_clear_of_the_mouth(self, fx):
-        origin, _, _ = fx.head_pose((300.0, 200.0), (960, 540), 1.0)
-        assert abs(origin[0] - 300.0) > 50
+    def test_population_respects_the_cap(self, fx, frame):
+        self.step(fx, frame, 2.0)
+        assert len(fx.particles) <= FlameSpec().max_particles
 
-    def test_yaw_tilts_the_head(self, fx):
+    def test_spawn_rate_fits_under_the_cap(self):
+        """If rate * life exceeds the cap, the cap culls the oldest particles -- which are
+        the far end of the jet -- and the flame silently cannot reach full length."""
+        s = FlameSpec()
+        assert s.rate * s.life <= s.max_particles
+
+    def test_particles_die_of_old_age(self, fx, frame):
+        self.step(fx, frame, 1.0)
+        assert float(fx.particles[:, 4].max()) < FlameSpec().life
+
+    def test_jet_travels_away_from_the_mouth(self, fx, frame):
+        self.step(fx, frame, 1.2)
+        assert float(fx.particles[:, 0].max()) > 250.0 + 40
+
+    def test_aim_is_straight_when_facing_camera(self, fx):
         fx.yaw = 0.0
-        flat = fx.head_pose((300.0, 200.0), (960, 540), 1.0)[1]
-        fx.yaw = 1.0
-        turned = fx.head_pose((300.0, 200.0), (960, 540), 1.0)[1]
-        assert abs(turned) > abs(flat)
+        assert fx.aim() == pytest.approx(0.0)
 
-    def test_tilt_stays_modest(self, fx):
-        """A steep tilt points the dragon at the floor instead of where you are looking."""
+    def test_aim_follows_head_yaw(self, fx):
         fx.yaw = 1.0
-        assert abs(fx.head_pose((300.0, 200.0), (960, 540), 1.0)[1]) < 0.6
+        right = fx.aim()
+        fx.yaw = -1.0
+        left = fx.aim()
+        assert math.cos(right) > 0 > math.cos(left)
 
     def test_set_yaw_eases_rather_than_snaps(self, fx):
         fx.set_yaw(1.0)
@@ -701,67 +739,68 @@ class TestDragonFire:
         fx.set_yaw(None)
         assert fx.yaw == held
 
-    def test_aims_right_when_looking_right(self, frame):
-        fx = DragonFireEffect(DragonSpec(), seed=1)
-        fx.yaw = 0.9
-        fx.draw(frame, (320.0, 150.0), 0.0, 1.2)
-        assert frame[:, 340:].mean() > frame[:, :300].mean()
+    def test_fire_blows_right_when_looking_right(self, frame):
+        fx = FlameBreathEffect(FlameSpec(), seed=1)
+        fx.yaw = 1.0
+        self.step(fx, frame, 1.2, mouth=(320.0, 150.0))
+        assert frame[:, 380:].mean() > frame[:, :260].mean()
 
-    def test_aims_left_when_looking_left(self, frame):
-        fx = DragonFireEffect(DragonSpec(), seed=1)
-        fx.yaw = -0.9
-        fx.draw(frame, (320.0, 150.0), 0.0, 1.2)
-        assert frame[:, :300].mean() > frame[:, 340:].mean()
+    def test_fire_blows_left_when_looking_left(self, frame):
+        fx = FlameBreathEffect(FlameSpec(), seed=1)
+        fx.yaw = -1.0
+        self.step(fx, frame, 1.2, mouth=(320.0, 150.0))
+        assert frame[:, :260].mean() > frame[:, 380:].mean()
 
     def test_draw_brightens_the_frame(self, fx, frame):
         before = frame.mean()
-        fx.draw(frame, (250.0, 150.0), 0.0, 1.2)
+        self.step(fx, frame, 1.0)
         assert frame.mean() > before
 
-    def test_nothing_before_ignition_or_after_expiry(self, fx, frame):
-        for age in (-0.1, 0.0, 99.0):
-            copy = frame.copy()
-            fx.draw(copy, (250.0, 150.0), 0.0, age)
-            assert np.array_equal(copy, frame), f"drew something at age {age}"
+    def test_core_reaches_white_hot(self, fx, frame):
+        """Spread thin over its length the jet stays dull red without an ignition core."""
+        self.step(fx, frame, 1.0)
+        assert frame.max() > 230
+
+    def test_flame_is_warm_coloured(self, fx, frame):
+        self.step(fx, frame, 1.0)
+        lit = frame[frame.max(axis=2) > 120]
+        assert len(lit) > 0 and lit[:, 2].mean() > lit[:, 0].mean()
+
+    def test_nothing_before_ignition(self, fx, frame):
+        before = frame.copy()
+        fx.draw(frame, (250.0, 150.0), 0.0, 0.0)
+        assert np.array_equal(frame, before)
+
+    def test_particles_expire_after_the_jet_stops(self, fx, frame):
+        self.step(fx, frame, FlameSpec().duration + FlameSpec().life + 0.5)
+        assert len(fx.particles) == 0
 
     def test_additive_saturates_rather_than_wrapping(self, frame):
         frame[:] = 250
-        DragonFireEffect(DragonSpec(), seed=2).draw(frame, (250.0, 150.0), 0.0, 1.2)
+        self.step(FlameBreathEffect(FlameSpec(), seed=2), frame, 1.0)
         assert frame.min() >= 250
 
-    def test_fire_is_warm_coloured(self, fx, frame):
-        """A BGR mix-up would make Fire Style come out blue."""
-        fx.draw(frame, (250.0, 150.0), 0.0, 1.2)
-        lit = frame[frame.max(axis=2) > 140]
-        assert len(lit) > 0 and lit[:, 2].mean() > lit[:, 0].mean()
+    def test_consecutive_frames_differ(self, frame):
+        fx = FlameBreathEffect(FlameSpec(), seed=4)
+        self.step(fx, frame, 0.6)
+        a = frame.copy()
+        fx.draw(frame, (250.0, 150.0), 0.0, 0.65)
+        assert not np.array_equal(a, frame)
 
-    def test_mane_flickers_between_frames(self, frame):
-        fx = DragonFireEffect(DragonSpec(), seed=4)
-        a, b = frame.copy(), frame.copy()
-        fx.draw(a, (250.0, 150.0), 0.0, 1.2)
-        fx.draw(b, (250.0, 150.0), 0.0, 1.2)
-        assert not np.array_equal(a, b)
-
-    @pytest.mark.parametrize("mouth", [(0.0, 0.0), (639.0, 359.0), (-50.0, 180.0)])
+    @pytest.mark.parametrize("mouth", [(0.0, 0.0), (639.0, 359.0), (-60.0, 180.0)])
     def test_offscreen_mouth_is_safe(self, fx, frame, mouth):
-        fx.draw(frame, mouth, 0.0, 1.2)
+        self.step(fx, frame, 0.6, mouth=mouth)
 
-    def test_fades_out_at_the_end(self, fx, frame):
-        mid, late = frame.copy(), frame.copy()
-        fx.draw(mid, (250.0, 150.0), 0.0, 1.5)
-        fx.draw(late, (250.0, 150.0), 0.0, DragonSpec().duration - 0.05)
-        assert late.mean() < mid.mean()
-
-    def test_head_geometry_is_not_degenerate(self):
-        from handsign.effects import _LOWER_JAW, _SKULL
-        assert len(_SKULL) >= 6 and len(_LOWER_JAW) >= 6
+    def test_intensity_envelope_stays_in_range(self, fx):
+        for t in np.linspace(-0.5, FlameSpec().duration + 1, 200):
+            assert 0.0 <= fx.intensity(float(t)) <= 1.0
 
 
 class TestAllEffectsRegistered:
     def test_four_jutsu_have_effects(self):
         assert set(EFFECTS) == {"Chidori", "Transformation Jutsu",
-                                "Clone Jutsu", "Dragon Fire Jutsu"}
+                                "Clone Jutsu", "Dragon Flame Jutsu"}
 
     def test_each_uses_a_distinct_spec_type(self):
         kinds = {type(v).__name__ for v in EFFECTS.values()}
-        assert kinds == {"EffectSpec", "TransformSpec", "CloneSpec", "DragonSpec"}
+        assert kinds == {"EffectSpec", "TransformSpec", "CloneSpec", "FlameSpec"}

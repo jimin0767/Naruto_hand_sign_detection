@@ -572,29 +572,6 @@ class CloneEffect:
         blit_rgba(frame, self.cutout, ox, oy, 1.0)
         return frame
 
-# --------------------------------------------------------------------------------------
-# Dragon fire (a roaring fire dragon head breathed from the mouth)
-# --------------------------------------------------------------------------------------
-
-@dataclass
-class DragonSpec:
-    """Shape, colour and timing for the fire dragon head."""
-    duration: float = 5.0
-    grow: float = 0.45             # seconds for the head to rush out to full size
-    fade: float = 0.6
-    # Local head geometry spans about 2.45 units across (skull + horns + mane), so this
-    # is scaled by that, not by 1. Getting it wrong produced a head twice the frame wide.
-    size: float = 0.19             # head extent as a fraction of frame width
-    reach: float = 0.24            # distance from the mouth, as a fraction of frame width
-    yaw_swing: float = 0.34        # radians of tilt at full head-yaw; the left/right
-                                   # aiming is the mirror, this is only the lean
-    jaw: float = 0.42              # jaw opening, radians
-    mane: int = 15                 # flame tongues around the skull
-    core: tuple[int, int, int] = (150, 245, 255)    # BGR: yellow-white
-    mid: tuple[int, int, int] = (30, 150, 255)      # orange
-    glow: tuple[int, int, int] = (10, 60, 200)      # deep red-orange
-
-
 def estimate_yaw(keypoints) -> float | None:
     """Head yaw in [-1, 1] from COCO pose keypoints: -1 full left, 0 facing camera, +1 right.
 
@@ -624,162 +601,187 @@ def estimate_yaw(keypoints) -> float | None:
     return max(-1.0, min(1.0, yaw))
 
 
-# Dragon head in local coordinates: snout along +x, size 1.0 from hinge to nose tip,
-# +y downward. Everything is defined once here and then rotated, scaled and translated,
-# which keeps the drawing code free of trigonometry.
-_SKULL = [
-    (-0.42, -0.30), (-0.22, -0.52), (0.16, -0.55), (0.52, -0.46),
-    (0.86, -0.30), (1.02, -0.12), (0.98, 0.02), (0.60, 0.06),
-    (0.10, 0.10), (-0.34, 0.06),
-]
-_LOWER_JAW = [
-    (-0.30, 0.10), (0.12, 0.22), (0.56, 0.34), (0.86, 0.46),
-    (0.80, 0.58), (0.44, 0.52), (0.02, 0.38), (-0.32, 0.24),
-]
-_UPPER_TEETH = [(0.86, 0.02), (0.62, 0.02), (0.38, 0.04), (0.16, 0.07)]
-_LOWER_TEETH = [(0.78, 0.42), (0.54, 0.32), (0.30, 0.24), (0.08, 0.18)]
-_HORNS = [
-    ((-0.10, -0.50), (-0.78, -0.86)),
-    ((0.22, -0.54), (-0.34, -1.02)),
-    ((-0.30, -0.34), (-0.98, -0.48)),
-]
-_EYE = (0.46, -0.26)
+# --------------------------------------------------------------------------------------
+# Flame breath (a jet of fire from the mouth)
+# --------------------------------------------------------------------------------------
+
+@dataclass
+class FlameSpec:
+    """Shape, behaviour and timing for the flame jet."""
+    duration: float = 5.0
+    ramp: float = 0.30             # seconds for the jet to reach full pressure
+    fade: float = 0.7
+    reach: float = 0.55            # jet length as a fraction of frame width
+    spread: float = 0.26           # cone half-angle, radians
+    yaw_swing: float = 1.15        # radians of aim at full head yaw
+    rate: int = 620                # particles per SECOND; must stay under
+                                   # max_particles/life or the cap truncates the
+                                   # oldest particles, which are the jet's far end
+    life: float = 0.85             # particle lifetime, seconds
+    buoyancy: float = 0.55         # upward drift as a fraction of frame height per second
+    turbulence: float = 0.75       # random walk strength
+    size: float = 0.034            # particle radius at death, fraction of frame height
+    max_particles: int = 700
 
 
-def _place(points, origin, angle, scale, flip):
-    """Rotate/scale/translate local head coordinates into frame pixels."""
-    cos_a, sin_a = math.cos(angle), math.sin(angle)
-    out = []
-    for x, y in points:
-        x = x * flip
-        out.append((origin[0] + (x * cos_a - y * sin_a) * scale,
-                    origin[1] + (x * sin_a + y * cos_a) * scale))
-    return out
+def fire_lut() -> np.ndarray:
+    """256-entry BGR ramp, shaped (256, 1, 3) as cv2.applyColorMap requires.
+
+    Black to dark red to orange to yellow to white.
+
+    Flame colour tracks temperature, so the renderer accumulates a scalar heat field and
+    maps it through this once. Colouring each particle individually cannot produce the
+    continuous gradient that makes fire look like fire; overlapping coloured blobs just
+    read as overlapping blobs.
+    """
+    stops = [
+        (0.00, (0, 0, 0)),
+        (0.18, (0, 0, 60)),
+        (0.34, (0, 24, 160)),
+        (0.52, (10, 90, 235)),
+        (0.70, (40, 175, 255)),
+        (0.86, (150, 240, 255)),
+        (1.00, (255, 255, 255)),
+    ]
+    lut = np.zeros((256, 1, 3), np.uint8)
+    for i in range(256):
+        t = i / 255.0
+        for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
+            if t0 <= t <= t1:
+                k = (t - t0) / max(t1 - t0, 1e-6)
+                lut[i, 0] = [int(c0[j] + (c1[j] - c0[j]) * k) for j in range(3)]
+                break
+    return lut
 
 
-class DragonFireEffect:
-    """A roaring dragon head made of fire, breathed from the caster's mouth.
+_FIRE_LUT = fire_lut()
 
-    Built as a head rather than a long body: the source material's dragon reads as a
-    huge open-jawed skull wreathed in flame, and a serpentine ribbon -- the obvious
-    procedural shape -- does not resemble it at any length.
 
-    The head is defined once in local coordinates and then rotated to follow the caster's
-    head yaw, so looking straight at the camera sends the dragon straight out and turning
-    aims it where the caster is facing.
+class FlameBreathEffect:
+    """A jet of fire breathed from the mouth, aimed by the caster head yaw.
+
+    Particles rather than geometry, because fire has no silhouette to draw. Each particle
+    is a puff of hot gas launched from the mouth that slows, rises as it cools, and swells
+    as it dissipates. They accumulate into a scalar heat field which is blurred once and
+    mapped through a temperature ramp, and that is what produces continuous flame instead
+    of a pile of overlapping orange circles.
     """
 
-    def __init__(self, spec: DragonSpec, seed: int | None = None):
+    def __init__(self, spec: FlameSpec, seed: int | None = None):
         self.spec = spec
         self.rng = np.random.default_rng(seed)
         self.yaw = 0.0
+        self.last_time: float | None = None
+        # Columns: x, y, vx, vy, age, heat
+        self.particles = np.zeros((0, 6), np.float32)
 
     def set_yaw(self, yaw: float | None) -> None:
-        """Called per frame with the caster's head yaw; None keeps the previous value."""
+        """Aim the jet where the caster is looking; None keeps the previous value."""
         if yaw is not None:
-            # Ease toward the new yaw: raw pose yaw is jittery and a snapping dragon
-            # looks broken rather than responsive.
-            self.yaw += (yaw - self.yaw) * 0.35
+            self.yaw += (yaw - self.yaw) * 0.3
 
     def intensity(self, age: float) -> float:
         s = self.spec
         if age < 0 or age > s.duration:
             return 0.0
+        if age < s.ramp:
+            return age / s.ramp
         if age > s.duration - s.fade:
             return max(0.0, (s.duration - age) / s.fade)
         return 1.0
 
-    def extent(self, age: float) -> float:
-        """0..1 as the head rushes out from the mouth."""
-        t = min(1.0, max(0.0, age) / max(self.spec.grow, 1e-6))
-        return t * t * (3 - 2 * t)        # smoothstep
+    def aim(self) -> float:
+        """Jet direction in radians. 0 points right, pi points left."""
+        turn = max(-1.0, min(1.0, self.yaw))
+        if turn >= 0:
+            return turn * self.spec.yaw_swing * 0.5
+        return math.pi - abs(turn) * self.spec.yaw_swing * 0.5
 
-    def head_pose(self, mouth, frame_size, age):
-        """Where the head sits, how big, and which way it points."""
+    def _spawn(self, mouth, frame_size, level, count):
         s = self.spec
-        width, _ = frame_size
-        grow = self.extent(age)
-        angle = self.yaw * s.yaw_swing
-        scale = s.size * width * (0.35 + 0.65 * grow)
-        reach = s.reach * width * grow
-        origin = (mouth[0] + math.cos(angle) * reach * (1 if self.yaw >= 0 else -1),
-                  mouth[1] + math.sin(abs(angle)) * reach * 0.35 + scale * 0.34)
-        return origin, angle, scale
+        width, height = frame_size
+        speed = s.reach * width / max(s.life, 1e-6)
+        angle = self.aim()
+        new = np.zeros((count, 6), np.float32)
+        jitter = self.rng.normal(0.0, s.spread * 0.5, count)
+        # Speed varies per particle. A uniform jet reads as a solid cone; the spread of
+        # velocities is what gives flame its ragged, licking edge.
+        speeds = speed * self.rng.uniform(0.45, 1.15, count) * (0.55 + 0.45 * level)
+        new[:, 0] = mouth[0] + self.rng.normal(0.0, height * 0.008, count)
+        new[:, 1] = mouth[1] + self.rng.normal(0.0, height * 0.008, count)
+        new[:, 2] = np.cos(angle + jitter) * speeds
+        new[:, 3] = np.sin(angle + jitter) * speeds
+        new[:, 5] = self.rng.uniform(0.7, 1.0, count)
+        self.particles = np.vstack([self.particles, new])[-s.max_particles:]
 
-    def _silhouette(self, layer, origin, angle, scale, flip, colour, jaw_drop, bloat):
+    def _advance(self, dt, frame_size):
         s = self.spec
-        skull = _place([(x, y * bloat) for x, y in _SKULL], origin, angle, scale, flip)
-        cv2.fillPoly(layer, [np.array(skull, np.int32)], colour, cv2.LINE_AA)
-
-        jaw_local = _place(_LOWER_JAW, (0.0, 0.0), jaw_drop, 1.0, 1.0)
-        jaw = _place([(x, y * bloat) for x, y in jaw_local], origin, angle, scale, flip)
-        cv2.fillPoly(layer, [np.array(jaw, np.int32)], colour, cv2.LINE_AA)
-
-        for base, tip in _HORNS:
-            a, b = _place([base, tip], origin, angle, scale, flip)
-            cv2.line(layer, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
-                     colour, max(2, int(scale * 0.055 * bloat)), cv2.LINE_AA)
-
-        # Mane: ragged flame tongues off the back of the skull, regenerated every frame.
-        for i in range(s.mane):
-            t = i / max(s.mane - 1, 1)
-            base_local = (-0.42 + 0.9 * t, -0.52 - 0.10 * math.sin(t * math.pi))
-            direction = -2.3 + t * 2.0 + self.rng.uniform(-0.4, 0.4)
-            length = self.rng.uniform(0.24, 0.58)
-            tip_local = (base_local[0] + math.cos(direction) * length,
-                         base_local[1] + math.sin(direction) * length)
-            a, b = _place([base_local, tip_local], origin, angle, scale, flip)
-            path = jagged_path(self.rng, a, b, scale * 0.05)
-            cv2.polylines(layer, [np.array(path, np.int32)], False, colour,
-                          max(2, int(scale * 0.045 * bloat)), cv2.LINE_AA)
+        if not len(self.particles):
+            return
+        p = self.particles
+        p[:, 0] += p[:, 2] * dt
+        p[:, 1] += p[:, 3] * dt
+        # Drag first, then buoyancy: hot gas slows quickly and then rises as it cools,
+        # which curls the tail of the jet upward instead of leaving it a straight line.
+        decay = max(0.0, 1.0 - 1.1 * dt)
+        p[:, 2] *= decay
+        p[:, 3] *= decay
+        p[:, 3] -= s.buoyancy * frame_size[1] * dt
+        if s.turbulence:
+            wobble = s.turbulence * frame_size[1] * dt
+            p[:, 2] += self.rng.normal(0.0, wobble, len(p))
+            p[:, 3] += self.rng.normal(0.0, wobble, len(p))
+        p[:, 4] += dt
+        self.particles = p[p[:, 4] < s.life]
 
     def draw(self, frame: np.ndarray, centre: tuple[float, float],
              radius: float, age: float) -> np.ndarray:
-        """`centre` is the mouth. `radius` is unused -- size comes from the frame."""
+        """`centre` is the mouth. `radius` is unused; size comes from the frame."""
+        s = self.spec
         level = self.intensity(age)
-        if level <= 0.01 or self.extent(age) <= 0.02:
+        height, width = frame.shape[:2]
+
+        dt = 1 / 30 if self.last_time is None else min(0.1, max(1e-3, age - self.last_time))
+        self.last_time = age
+        self._advance(dt, (width, height))
+        if level > 0.01:
+            self._spawn(centre, (width, height), level,
+                        max(1, int(s.rate * dt * level)))
+        if not len(self.particles):
             return frame
 
-        s = self.spec
-        height, width = frame.shape[:2]
-        # Mirror the head so its snout leads away from the caster rather than into them.
-        flip = 1.0 if self.yaw >= 0 else -1.0
-        origin, angle, scale = self.head_pose(centre, (width, height), age)
-        jaw_drop = s.jaw * (0.35 + 0.65 * self.extent(age))
+        # Accumulate at half resolution: the field is blurred anyway, so the detail is
+        # thrown away regardless, and rasterising 700 circles costs a quarter as much.
+        scale = 0.5
+        hh, hw = int(height * scale), int(width * scale)
+        heat = np.zeros((hh, hw), np.float32)
+        max_radius = s.size * height * scale
+        for x, y, _, _, born, hot in self.particles:
+            t = float(born) / s.life
+            # Cool and swell with age: a small bright core leaving the mouth becomes a
+            # large faint smudge by the time it dies.
+            radius_px = max(1, int(max_radius * (0.18 + 0.82 * t)))
+            # float(): OpenCV rejects numpy scalars for the colour argument.
+            # Each particle contributes only a sliver. Full-strength blobs saturate the
+            # field to white on the first overlap, which is a glowing lozenge, not fire --
+            # the gradient has to be built up by accumulation.
+            value = float(float(hot) * 0.46 * (1.0 - t) ** 1.5 * level)
+            cv2.circle(heat, (int(x * scale), int(y * scale)), radius_px, value, -1)
 
-        layer = np.zeros_like(frame)
-        for colour, bloat, blur, weight in (
-            (s.glow, 1.22, scale * 0.10, 0.40),
-            (s.mid, 1.04, scale * 0.03, 0.85),
-            (s.core, 0.78, 0.0, 0.42),
-        ):
-            tinted = tuple(int(c * level * weight) for c in colour)
-            pass_layer = np.zeros_like(frame)
-            self._silhouette(pass_layer, origin, angle, scale, flip, tinted,
-                             jaw_drop, bloat)
-            if blur > 0.5:
-                pass_layer = cv2.GaussianBlur(pass_layer, (0, 0), blur)
-            layer = cv2.add(layer, pass_layer)
+        # The ignition point itself: the jet is spread thin over its length, so without
+        # this the mouth never reaches white and the whole plume stays dull red.
+        cv2.circle(heat, (int(centre[0] * scale), int(centre[1] * scale)),
+                   max(2, int(max_radius * 0.85)), float(level), -1)
 
-        # Teeth and the eye go on last, in near-white, so they survive the glow passes.
-        hot = tuple(int(c * level) for c in (255, 255, 255))
-        for (tx, ty), depth in zip(_UPPER_TEETH, (0.10, 0.12, 0.11, 0.09)):
-            tri = _place([(tx, ty), (tx - 0.06, ty), (tx - 0.03, ty + depth)],
-                         origin, angle, scale, flip)
-            cv2.fillPoly(layer, [np.array(tri, np.int32)], hot, cv2.LINE_AA)
-        jaw_teeth = _place(_LOWER_TEETH, (0.0, 0.0), jaw_drop, 1.0, 1.0)
-        for (tx, ty), depth in zip(jaw_teeth, (0.10, 0.11, 0.10, 0.08)):
-            tri = _place([(tx, ty), (tx - 0.06, ty), (tx - 0.03, ty - depth)],
-                         origin, angle, scale, flip)
-            cv2.fillPoly(layer, [np.array(tri, np.int32)], hot, cv2.LINE_AA)
-
-        eye = _place([_EYE], origin, angle, scale, flip)[0]
-        cv2.circle(layer, (int(eye[0]), int(eye[1])),
-                   max(2, int(scale * 0.05)), (0, 0, 0), -1, cv2.LINE_AA)
-        cv2.circle(layer, (int(eye[0]), int(eye[1])),
-                   max(1, int(scale * 0.026)), hot, -1, cv2.LINE_AA)
-
-        frame[:] = cv2.add(frame, layer)
+        heat = cv2.GaussianBlur(heat, (0, 0), max(1.5, max_radius * 0.30))
+        heat = np.clip(heat, 0.0, 1.0)
+        # Colour at half resolution too, then upscale: the alternative is three
+        # full-resolution float passes for detail the blur already discarded.
+        coloured = cv2.applyColorMap((heat * 255).astype(np.uint8), _FIRE_LUT)
+        coloured = (coloured * heat[:, :, None]).astype(np.uint8)
+        coloured = cv2.resize(coloured, (width, height), interpolation=cv2.INTER_LINEAR)
+        # Additive, so cool outer wisps stay translucent while the core burns to white.
+        frame[:] = cv2.add(frame, coloured)
         return frame
 
 
@@ -789,11 +791,11 @@ class DragonFireEffect:
 
 TRANSFORMATION = TransformSpec(duration=6.0, smoke_s=0.55, scale=1.3)
 CLONE = CloneSpec(duration=6.0, count=6)
-DRAGON_FIRE = DragonSpec()
+DRAGON_FLAME = FlameSpec()
 
 EFFECTS.update({
     "Chidori": CHIDORI,
     "Transformation Jutsu": TRANSFORMATION,
     "Clone Jutsu": CLONE,
-    "Dragon Fire Jutsu": DRAGON_FIRE,
+    "Dragon Flame Jutsu": DRAGON_FLAME,
 })

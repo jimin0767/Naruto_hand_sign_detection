@@ -46,7 +46,7 @@ Weights are **not** in this repo — download `best.pt` (and `best.onnx`) from t
 | **Lightning** | Chidori's effect, tracking your hand for 5 s (`--effect-seconds` to change) |
 | **Smoke, then a character** | Transformation Jutsu, tracking your whole body for 6 s |
 | **A crowd of you** | Clone Jutsu, six copies mirroring your movement for 6 s |
-| **Fire from your mouth** | Dragon Fire Jutsu, a serpentine fire dragon for 5.5 s |
+| **Fire from your mouth** | Dragon Flame Jutsu, a jet of flame for 5 s, aimed by your head |
 
 **If a sign will not commit,** watch the brackets and the stability bar. Grey brackets mean
 the model sees the sign but is not confident enough to count it — the bar stalls partway
@@ -172,8 +172,8 @@ it sits on the frame edge, but a shrunk and lifted clone drags that line into op
 where it reads as a pasted rectangle, so the bottom of every cutout is dissolved into a
 gradient.
 
-**Dragon Fire Jutsu** breathes a roaring dragon head from your mouth, and **aims it where
-you are looking** — face the camera and it goes straight out, turn your head and it follows.
+**Dragon Flame Jutsu** breathes a jet of fire from your mouth and **aims it where you are
+looking** — face the camera and it goes straight out, turn your head and it follows.
 
 The mouth comes from the COCO pose model's nose keypoint, offset downward by your eye
 separation so it holds at any distance. Yaw comes from where the nose sits *between* the
@@ -181,20 +181,23 @@ eyes: centred means facing the camera, and as you turn it slides toward the near
 the eyes crowd together. Ear visibility disambiguates a strong turn, where one ear
 disappears entirely.
 
-The head is a set of polygons — skull, hinged lower jaw, teeth, eye, swept horns, and a
-ragged flame mane regenerated every frame — defined once in local coordinates and then
-rotated, scaled and mirrored into place. Fire is three weighted passes over the same
-silhouette, composited additively.
+Fire is a particle system, not geometry — flame has no silhouette to draw. Each particle is
+a puff of hot gas launched from the mouth that slows, rises as it cools, and swells as it
+dissipates. They accumulate into a scalar **heat field** which is blurred once and mapped
+through a temperature ramp, and that is what produces continuous flame instead of a pile of
+overlapping orange circles. The field is built and coloured at half resolution, since the
+blur discards that detail anyway; doing it full-size cost 3x the time for no visible gain.
 
-Tune it to your framing without editing code:
+Tune it to your framing:
 
 ```bash
-python 04_demo.py --dragon-size 0.24      # bigger head
-python 04_demo.py --dragon-reach 0.30     # further from your face
+python 04_demo.py --flame-reach 0.7      # longer jet
+python 04_demo.py --flame-spread 0.4     # wider, fatter cone
 ```
 
-Note it washes out against a very bright background — additive light on a near-white wall
-saturates. A darker backdrop makes it read much more strongly.
+If you raise `rate` or `life` in `FlameSpec`, keep `rate * life` under `max_particles`.
+The cap discards the *oldest* particles, which are the far end of the jet, so exceeding it
+silently shortens the flame no matter what `reach` says.
 
 Add more in `handsign/effects.py` — `EFFECTS` maps a jutsu name to an `EffectSpec`
 (procedural), `TransformSpec` (sprite), `CloneSpec` (segmentation), or `DragonSpec`. A name

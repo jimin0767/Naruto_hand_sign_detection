@@ -40,8 +40,8 @@ from handsign.effects import (
     AnchorTracker,
     CloneEffect,
     CloneSpec,
-    DragonFireEffect,
-    DragonSpec,
+    FlameBreathEffect,
+    FlameSpec,
     estimate_yaw,
     LightningEffect,
     TransformEffect,
@@ -105,11 +105,11 @@ def main() -> int:
     parser.add_argument("--segment-model", default="yolo11n-seg.pt",
                         help="COCO segmentation model used to cut you out for clones")
     parser.add_argument("--pose-model", default="yolo11n-pose.pt",
-                        help="COCO pose model used to find your mouth for fire jutsu")
-    parser.add_argument("--dragon-size", type=float, default=None,
-                        help="fire dragon head size as a fraction of frame width")
-    parser.add_argument("--dragon-reach", type=float, default=None,
-                        help="how far the dragon head sits from your mouth")
+                        help="COCO pose model used to find your mouth and head yaw")
+    parser.add_argument("--flame-reach", type=float, default=None,
+                        help="flame jet length as a fraction of frame width")
+    parser.add_argument("--flame-spread", type=float, default=None,
+                        help="flame cone half-angle in radians; wider is a fatter jet")
     parser.add_argument("--clones", type=int, default=None,
                         help="how many copies Clone Jutsu creates (default 6)")
     parser.add_argument("--no-mirror", action="store_true")
@@ -210,18 +210,18 @@ def main() -> int:
                                     person_model = YOLO(args.person_model)
                                 person_anchor.reset()
                                 effect, effect_at = TransformEffect(spec, sprite), now
-                        elif isinstance(spec, DragonSpec):
+                        elif isinstance(spec, FlameSpec):
                             if args.effect_seconds:
                                 spec = replace(spec, duration=args.effect_seconds)
-                            if args.dragon_size:
-                                spec = replace(spec, size=args.dragon_size)
-                            if args.dragon_reach:
-                                spec = replace(spec, reach=args.dragon_reach)
+                            if args.flame_reach:
+                                spec = replace(spec, reach=args.flame_reach)
+                            if args.flame_spread:
+                                spec = replace(spec, spread=args.flame_spread)
                             if pose_model is None:
                                 from ultralytics import YOLO
                                 pose_model = YOLO(args.pose_model)
                             mouth_anchor.reset()
-                            effect, effect_at = DragonFireEffect(spec), now
+                            effect, effect_at = FlameBreathEffect(spec), now
                         elif isinstance(spec, CloneSpec):
                             if args.effect_seconds:
                                 spec = replace(spec, duration=args.effect_seconds)
@@ -271,7 +271,7 @@ def main() -> int:
                 if now - effect_at > effect.spec.duration:
                     effect = None
                 else:
-                    if isinstance(effect, DragonFireEffect):
+                    if isinstance(effect, FlameBreathEffect):
                         # COCO pose gives a nose keypoint; the mouth sits a little below
                         # it, scaled by the eye separation so it holds at any distance.
                         pk = pose_model.predict(frame, conf=0.35, verbose=False,
