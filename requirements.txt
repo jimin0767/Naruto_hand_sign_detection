@@ -14,5 +14,12 @@ onnxruntime>=1.18            # use onnxruntime-gpu for CUDA inference
 # Tests
 pytest>=8.0
 
+# Jutsu voice clips (04_demo.py, 06_voice.py) -- both optional.
+# Playback falls back to the Windows stdlib (winsound) or to ffplay/afplay/aplay, so the
+# demo speaks without either of these; sounddevice is simply the smoothest of the four.
+#   pip install sounddevice
+# Cutting clips needs ffmpeg on PATH; if you would rather not install it system-wide:
+#   pip install imageio-ffmpeg
+
 # For CUDA training, install torch from the appropriate index first, e.g.:
 #   pip install torch --index-url https://download.pytorch.org/whl/cu126

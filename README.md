@@ -27,7 +27,11 @@ python 04_demo.py --source clip.mp4             # a video file
 python 04_demo.py --jutsu demo-short.csv        # 7 short jutsu, easier to present
 python 04_demo.py --accept-conf 0.75            # stricter; fewer false positives
 python 04_demo.py --record out.mp4              # save the session
+python 04_demo.py --no-voice                    # do not speak the jutsu name
 ```
+
+Jutsu can shout their own name in the character's voice — supply the clips with
+[`06_voice.py`](#voice).
 
 Weights are **not** in this repo — download `best.pt` (and `best.onnx`) from the
 [Releases](../../releases) page and place them at
@@ -244,6 +248,62 @@ like a blown-out beam — an artifact that cost real tuning time here.
 **unreachable** — a shorter jutsu completing partway through a longer one clears the
 buffer and blocks it. Edit freely; the loader checks your work.
 
+### Voice
+
+A jutsu can shout its own name as it fires, in the character's actual voice. Speech
+synthesis is the obvious alternative and it is the wrong one — a system voice reading
+"Chidori" flatly undoes the moment the effect just built. So the demo plays a **clip you
+cut out of the show**, and `06_voice.py` does the cutting:
+
+```bash
+# 1. find the line: prints the non-silent ranges, so no video editor is needed
+python 06_voice.py --video Kakashi_chidori.mp4 --scan
+
+   1.     1.42 ->    3.18 s  ( 1.76s)   --start 1.42 --end 3.18
+
+# 2. cut it, using the range from step 1
+python 06_voice.py --video Kakashi_chidori.mp4 --jutsu Chidori --start 1.42 --end 3.18
+
+# 3. check what has a voice and what does not
+python 06_voice.py --list
+```
+
+That writes `assets/voice/chidori.wav`, which `04_demo.py` picks up with no further
+configuration — cast the sequence and Kakashi says the line. Add `--play` to hear the
+result immediately, and `--gain 3` if it still sits too low against the room.
+
+The clip is trimmed, downmixed to mono 44.1 kHz 16-bit PCM, and **peak-normalised** to
+−1 dBFS. Levelling is not polish: anime is mixed with a lot of headroom, so a raw extract
+plays back noticeably quieter than the room expects and the line disappears under
+ambient noise. Normalising every clip also means they all land at the same level, which
+matters as soon as there is more than one. Short fades top and tail the cut — a hard cut
+mid-waveform pops.
+
+Clips are matched to jutsu **by name**: `assets/voice/fireball_jutsu.wav` fires for
+"Fireball Jutsu". `Chidori.WAV` and `Fireball Jutsu.wav` work too, since both sides are
+slugified before comparison.
+
+Playback needs an audio backend, and the demo takes the first one that exists:
+
+| backend | notes |
+|---|---|
+| `sounddevice` | cross-platform, lowest latency, cleanest cut-off. `pip install sounddevice` |
+| `simpleaudio` | cross-platform, WAV only |
+| `winsound` | Windows stdlib — **no install**, which is why sound works out of the box |
+| `ffplay` / `afplay` / `aplay` | last resort, spawns a process per cast |
+
+Pin one with `--audio-backend sounddevice`, or mute everything with `--no-voice`.
+
+Two things are deliberate. Clips are decoded **at startup**, not on the cast — reading a
+file inside the frame loop costs a visible hitch on exactly the frame that matters. And
+nothing about voice can raise into that loop: a missing clip, an unreadable file, or a
+machine with no audio device at all leaves the demo running silently rather than dying
+mid-presentation.
+
+`assets/` is gitignored, and anime audio is copyrighted — the clips stay on your machine,
+exactly like the transform sprite. `06_voice.py` needs ffmpeg on PATH, or
+`pip install imageio-ffmpeg`, which ships its own copy.
+
 ## Results
 
 | | val (2 unseen people) | test (1 unseen person) |
@@ -269,6 +329,9 @@ python 02_split.py             # content-derived subject-disjoint splits
 python 03_train.py             # YOLO11m, 640, batch 12                 -> ~3.5 h
 python 05_export.py            # ONNX for game engines
 ```
+
+`06_voice.py` is not part of that pipeline — it cuts jutsu voice clips out of a video and
+can be run at any point.
 
 Each stage prints what it did and refuses to proceed on bad input. `01` aborts on an
 unrecognised class name rather than guessing; `02` refuses to write a split that leaks.

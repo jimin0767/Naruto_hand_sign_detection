@@ -30,6 +30,14 @@ Four further datasets were evaluated and **excluded** for label-quality reasons
   or educational project.
 - PyTorch (BSD-3), OpenCV (Apache-2.0), NumPy (BSD-3), Pillow (HPND).
 
+## Voice clips and character art
+
+Neither is in this repository, and neither should be added to it. The jutsu voice clips
+built by `06_voice.py` and the sprite used by Transformation Jutsu are extracted from the
+anime, which is copyrighted by its rights holders; `assets/` is gitignored so they stay
+on the machine that made them. Supply your own from media you own, for demonstration and
+educational use.
+
 ## Trademark
 
 NARUTO is a trademark of Masashi Kishimoto / Shueisha. This project is unaffiliated,

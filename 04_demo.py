@@ -57,6 +57,7 @@ from handsign.effects import (
     load_sprite,
 )
 from handsign.ui import Card, DemoUI, UIState
+from handsign.voice import DEFAULT_VOICE_DIR, VoicePlayer
 
 DemoError = HandSignError
 
@@ -123,6 +124,14 @@ def main() -> int:
                         help="how hard the jet flares into a fireball (default 1.5)")
     parser.add_argument("--clones", type=int, default=None,
                         help="how many copies Clone Jutsu creates (default 6)")
+    parser.add_argument("--voice-dir", type=Path, default=DEFAULT_VOICE_DIR,
+                        help="folder of jutsu voice clips named after the jutsu "
+                             "(assets/voice/chidori.wav); build them with 06_voice.py")
+    parser.add_argument("--no-voice", action="store_true",
+                        help="stay silent when a jutsu fires")
+    parser.add_argument("--audio-backend", default=None,
+                        help="force one of sounddevice, simpleaudio, winsound, ffplay "
+                             "instead of taking the first that works")
     parser.add_argument("--no-mirror", action="store_true")
     parser.add_argument("--record", type=Path, default=None)
     parser.add_argument("--headless", action="store_true",
@@ -137,6 +146,19 @@ def main() -> int:
 
     jutsu = load_jutsu(args.jutsu)
     print(f"loaded {len(jutsu)} jutsu from {args.jutsu}")
+
+    # Built before the camera opens: every clip is decoded up front so a cast never waits
+    # on the disk. A missing folder is normal -- the demo simply stays silent.
+    voice = None
+    if not args.no_voice:
+        try:
+            voice = VoicePlayer(args.voice_dir, [j.name for j in jutsu],
+                                prefer=args.audio_backend)
+            print(voice.describe())
+            for name, why in voice.broken:
+                print(f"  voice for {name} unusable -- {why}", file=sys.stderr)
+        except Exception as exc:
+            print(f"error: {exc}; continuing without voice", file=sys.stderr)
 
     detector = HandSignDetector(args.weights, conf=args.conf, imgsz=args.imgsz,
                                 device=args.device)
@@ -207,6 +229,10 @@ def main() -> int:
                         jutsu_name, jutsu_element, jutsu_at = (
                             matched.name, matched.english, now)
                         cards = []
+                        # Before the effect is built, not after: the first cast of a
+                        # jutsu whose effect needs a COCO model pays seconds of load
+                        # time below, and the shout must not queue behind that.
+                        spoke = voice.play(matched.name) if voice else False
                         spec = effect_for(matched.name)
                         if isinstance(spec, TransformSpec):
                             if sprite is None:
@@ -256,7 +282,8 @@ def main() -> int:
                                 spec = replace(spec, duration=args.effect_seconds)
                             effect, effect_at = LightningEffect(spec), now
                         print(f"  *** {matched.name} ***"
-                              + ("  [effect]" if spec else ""))
+                              + ("  [effect]" if spec else "")
+                              + ("  [voice]" if spoke else ""))
                     else:
                         print(f"  {confirmed:8s} [{' > '.join(tracker.buffer)}]")
 
@@ -373,8 +400,12 @@ def main() -> int:
                     anchor.reset()
                     person_anchor.reset()
                     mouth_anchor.reset()
+                    if voice:
+                        voice.stop()
                     print("  -- reset")
     finally:
+        if voice:
+            voice.stop()            # otherwise a spawned player outlives the window
         cap.release()
         if writer is not None:
             writer.release()
