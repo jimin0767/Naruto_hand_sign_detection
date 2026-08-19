@@ -250,38 +250,72 @@ buffer and blocks it. Edit freely; the loader checks your work.
 
 ### Voice
 
-A jutsu can shout its own name as it fires, in the character's actual voice. Speech
+A jutsu can play its own sound as it fires, in the character's actual voice. Speech
 synthesis is the obvious alternative and it is the wrong one — a system voice reading
 "Chidori" flatly undoes the moment the effect just built. So the demo plays a **clip you
 cut out of the show**, and `06_voice.py` does the cutting:
 
 ```bash
-# 1. find the line: prints the non-silent ranges, so no video editor is needed
-python 06_voice.py --video Kakashi_chidori.mp4 --scan
+# already have a short clip of the moment? this is the whole job
+python 06_voice.py --video Kakashi_chidori.mp4 --jutsu Chidori --stereo --play
 
-   1.     1.42 ->    3.18 s  ( 1.76s)   --start 1.42 --end 3.18
+# working from something longer? --scan prints the non-silent ranges, no editor needed
+python 06_voice.py --video episode.mp4 --scan
 
-# 2. cut it, using the range from step 1
-python 06_voice.py --video Kakashi_chidori.mp4 --jutsu Chidori --start 1.42 --end 3.18
+   1.     1.42 ->    2.05 s  ( 0.63s)   --start 1.42 --end 2.05
+   2.     2.310 ->   3.18 s  ( 0.87s)   --start 2.31 --end 3.18
 
-# 3. check what has a voice and what does not
+  all.     1.42 ->    3.18 s  ( 1.76s)   --start 1.42 --end 3.18
+
+python 06_voice.py --video episode.mp4 --jutsu Chidori --start 1.42 --end 3.18 --stereo
+
+# check what has a sound and what does not
 python 06_voice.py --list
 ```
 
 That writes `assets/voice/chidori.wav`, which `04_demo.py` picks up with no further
-configuration — cast the sequence and Kakashi says the line. Add `--play` to hear the
-result immediately, and `--gain 3` if it still sits too low against the room.
+configuration — cast the sequence and Kakashi says the line. `--play` hears the result
+immediately, and `--gain 3` lifts it if it still sits too low against the room.
 
-The clip is trimmed, downmixed to mono 44.1 kHz 16-bit PCM, and **peak-normalised** to
-−1 dBFS. Levelling is not polish: anime is mixed with a lot of headroom, so a raw extract
-plays back noticeably quieter than the room expects and the line disappears under
-ambient noise. Normalising every clip also means they all land at the same level, which
-matters as soon as there is more than one. Short fades top and tail the cut — a hard cut
-mid-waveform pops.
+**Take the whole scene, not just the voice.** The shout on its own is the thinner half of
+what the show plays: Kakashi says "Chidori" *over* the crackle of it charging, and the
+crackle is most of why it lands. Giving no `--start`/`--end` at all uses an already-trimmed
+clip end to end, which is usually what you want. On a longer source, note what `--scan`
+does above — silence detection breaks at every dip, so the shout and the effect come back
+as *separate rows*, and taking one row is how a clip ends up as a bare voice line. The
+`all` row rejoins them. `--pad 0.3` widens a cut whose effect tail fell under the
+threshold.
+
+Use `--stereo` for any clip carrying effects. Effects are mixed wide, and folding them to
+mono sums the two sides out of phase — in the worst case the effect vanishes outright,
+which is not a hypothetical: it is what the test clip for this feature does. Mono stays
+the default because a shout alone is centred anyway and the file is half the size.
+
+Everything is levelled, and levelling is not polish: anime is mixed with a lot of
+headroom, so a raw extract plays back noticeably quieter than the room expects and the
+line disappears under ambient noise.
+
+| `--level` | what it matches | when |
+|---|---|---|
+| `peak` (default) | loudest sample → `--peak`, −1 dBFS | leaves the mix untouched otherwise, so the voice sits against the effect exactly as dubbed |
+| `rms` | average energy → `--rms`, −20 dBFS | a three-second scene and a one-second shout land at the same *loudness*, not merely the same ceiling |
+| `none` | nothing | you are levelling by hand with `--gain` |
+
+`rms` is capped by the ceiling, so on a clip whose effect towers far enough over the line
+it can only do what `peak` did — the tool says so when that happens, and `--limit` is the
+way past it, holding the peak down with a limiter instead of holding the gain down. That
+trades the effect's loudest moment for the rest of the clip coming up; on the test clip it
+buys the voice 10 dB with the peak still pinned at −1 dBFS. It is opt-in because it is the
+one setting here that changes the mix rather than the level.
+
+Short fades top and tail the cut — a hard cut mid-waveform pops. A clip plays to its own
+end: nothing trims it to the length of the banner or the effect, so a three-second scene
+plays all three seconds.
 
 Clips are matched to jutsu **by name**: `assets/voice/fireball_jutsu.wav` fires for
 "Fireball Jutsu". `Chidori.WAV` and `Fireball Jutsu.wav` work too, since both sides are
-slugified before comparison.
+slugified before comparison. `--list` shows length and channels per clip, which is enough
+to spot a bare voice line among scene clips.
 
 Playback needs an audio backend, and the demo takes the first one that exists:
 

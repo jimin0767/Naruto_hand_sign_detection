@@ -1,10 +1,11 @@
-"""Character voice clips for completed jutsu.
+"""Jutsu audio clips, cut from the show.
 
-The banner announces a jutsu visually; this plays the line the way the show does -- the
-actual character shouting it, cut out of an episode you supply. Speech synthesis is the
-obvious alternative and it sounds like a train station announcement: "Chidori" read
-flatly by a system voice undoes the moment the effect just built. The clip has to be the
-real one.
+The banner announces a jutsu visually; this plays it the way the show does. Speech
+synthesis is the obvious alternative and it sounds like a train station announcement:
+"Chidori" read flatly by a system voice undoes the moment the effect just built. The clip
+has to be the real one -- and a clip carrying the whole scene, the shout over the crackle
+of the jutsu charging, beats the shout alone by roughly the same distance again. Whatever
+06_voice.py was pointed at gets played back: voice, effects, score, mono or stereo.
 
 Clips live under `assets/voice/`, named after the jutsu they belong to:
 
@@ -12,6 +13,10 @@ Clips live under `assets/voice/`, named after the jutsu they belong to:
     assets/voice/fireball_jutsu.wav           ->  "Fireball Jutsu"
 
 Build them from a video with `06_voice.py`; the naming is handled for you.
+
+A clip runs to its own end. Nothing here trims one to the length of the banner or of the
+visual effect, so a three-second scene plays all three seconds; only casting the next
+jutsu, or resetting, cuts it off.
 
 Playback must never stall the capture loop -- 25 ms of blocking is two dropped frames --
 so every backend here starts the clip and returns immediately, and clips are decoded once

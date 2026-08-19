@@ -32,11 +32,16 @@ Four further datasets were evaluated and **excluded** for label-quality reasons
 
 ## Voice clips and character art
 
-Neither is in this repository, and neither should be added to it. The jutsu voice clips
-built by `06_voice.py` and the sprite used by Transformation Jutsu are extracted from the
-anime, which is copyrighted by its rights holders; `assets/` is gitignored so they stay
-on the machine that made them. Supply your own from media you own, for demonstration and
+Neither is in this repository, and neither should be added to it. The jutsu clips built by
+`06_voice.py` and the sprite used by Transformation Jutsu are extracted from the anime,
+which is copyrighted by its rights holders; `assets/` is gitignored so they stay on the
+machine that made them. Supply your own from media you own, for demonstration and
 educational use.
+
+Note that a clip cut with no `--start`/`--end`, or across the `all` range `--scan`
+reports, carries whatever else is in that stretch of the scene — sound effects and
+background score along with the line. That is the point of it, and it does not change the
+above: the clip stays local either way.
 
 ## Trademark
 

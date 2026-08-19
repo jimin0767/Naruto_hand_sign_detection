@@ -284,6 +284,26 @@ class TestTrimArgs:
             voice_script.trim_args(4.0, 2.0)
 
 
+class TestPadRange:
+    """`--pad` puts back the effect tail that silence detection cut off."""
+
+    def test_widens_both_ends(self):
+        assert voice_script.pad_range(2.0, 5.0, 0.5) == (1.5, 5.5)
+
+    def test_does_not_seek_before_the_start_of_the_file(self):
+        assert voice_script.pad_range(0.2, 3.0, 0.5) == (0.0, 3.5)
+
+    def test_open_ended_cut_stays_open_ended(self):
+        """There is nothing to add to an end that is already the end of the file."""
+        assert voice_script.pad_range(1.0, None, 0.5) == (0.5, None)
+
+    def test_whole_file_is_left_alone(self):
+        assert voice_script.pad_range(None, None, 0.5) == (None, None)
+
+    def test_no_pad_changes_nothing(self):
+        assert voice_script.pad_range(2.0, 5.0, 0.0) == (2.0, 5.0)
+
+
 class TestScanSegments:
     """`--scan` inverts ffmpeg's silence report; the inversion is the part that can be wrong."""
 
@@ -322,18 +342,172 @@ class TestScanSegments:
         ))
         assert voice_script.scan_segments("ffmpeg", Path("x.mp4")) == []
 
+    def test_a_scene_split_by_a_quiet_moment_is_reported_as_one_span(self, monkeypatch):
+        """The shout, the pause, then the effect -- three rows, one scene."""
+        monkeypatch.setattr(voice_script, "run_ffmpeg", self.fake_run(
+            "  Duration: 00:00:06.00, start: 0.000\n"
+            "[silencedetect] silence_start: 0.000\n"
+            "[silencedetect] silence_end: 0.80 | silence_duration: 0.80\n"
+            "[silencedetect] silence_start: 1.90\n"
+            "[silencedetect] silence_end: 2.30 | silence_duration: 0.40\n"
+            "[silencedetect] silence_start: 4.10\n"
+        ))
+        segments = voice_script.scan_segments("ffmpeg", Path("x.mp4"))
+        assert segments == [(0.80, 1.90), (2.30, 4.10)]
+        assert voice_script.scene_span(segments) == (0.80, 4.10)
 
-class TestMeasurePeak:
+
+class TestSceneSpan:
+    def test_joins_every_segment(self):
+        assert voice_script.scene_span([(1.0, 2.0), (2.5, 3.0), (3.4, 5.2)]) == (1.0, 5.2)
+
+    def test_a_single_segment_is_its_own_span(self):
+        assert voice_script.scene_span([(1.4, 3.2)]) == (1.4, 3.2)
+
+    def test_nothing_found_has_no_span(self):
+        assert voice_script.scene_span([]) is None
+
+
+class TestMeasureLevels:
+    VOLUMEDETECT = (
+        "[Parsed_volumedetect] mean_volume: -24.3 dB\n"
+        "[Parsed_volumedetect] max_volume: -12.7 dB\n"
+    )
+
     def test_reads_the_peak_ffmpeg_reports(self, monkeypatch):
-        monkeypatch.setattr(voice_script, "run_ffmpeg",
-                            lambda *a, **k: "[Parsed_volumedetect] max_volume: -12.7 dB\n")
+        monkeypatch.setattr(voice_script, "run_ffmpeg", lambda *a, **k: self.VOLUMEDETECT)
         assert voice_script.measure_peak("ffmpeg", Path("x.mp4"), None, None) == -12.7
+
+    def test_reads_both_levels(self, monkeypatch):
+        monkeypatch.setattr(voice_script, "run_ffmpeg", lambda *a, **k: self.VOLUMEDETECT)
+        assert voice_script.measure_levels("ffmpeg", Path("x.mp4"), None, None) == (-12.7, -24.3)
+
+    def test_a_missing_mean_falls_back_to_the_peak(self, monkeypatch):
+        """rms levelling then behaves like peak levelling instead of crashing."""
+        monkeypatch.setattr(voice_script, "run_ffmpeg",
+                            lambda *a, **k: "[Parsed_volumedetect] max_volume: -6.0 dB\n")
+        assert voice_script.measure_levels("ffmpeg", Path("x.mp4"), None, None) == (-6.0, -6.0)
 
     def test_a_video_with_no_audio_track_is_an_error(self, monkeypatch):
         """Silently writing an empty clip would only show up on stage."""
         monkeypatch.setattr(voice_script, "run_ffmpeg", lambda *a, **k: "Stream #0:0 Video\n")
         with pytest.raises(voice_script.VoiceBuildError, match="no audio"):
-            voice_script.measure_peak("ffmpeg", Path("x.mp4"), None, None)
+            voice_script.measure_levels("ffmpeg", Path("x.mp4"), None, None)
+
+    def args_for(self, monkeypatch, channels):
+        seen = {}
+
+        def fake_run(ffmpeg, args):
+            seen["args"] = args
+            return self.VOLUMEDETECT
+
+        monkeypatch.setattr(voice_script, "run_ffmpeg", fake_run)
+        voice_script.measure_levels("ffmpeg", Path("x.mp4"), None, None, channels)
+        return seen["args"], seen["args"][seen["args"].index("-af") + 1]
+
+    def test_levels_are_measured_through_the_layout_being_written(self, monkeypatch):
+        """Gain computed from a stereo peak, applied to a mono downmix, lands short.
+
+        A wide-panned effect loses level when it is folded, so the two layouts genuinely
+        measure differently and the measurement has to follow the output.
+        """
+        assert "channel_layouts=mono" in self.args_for(monkeypatch, 1)[1]
+        assert "channel_layouts=stereo" in self.args_for(monkeypatch, 2)[1]
+
+    def test_the_fold_is_in_the_filter_chain_not_the_output(self, monkeypatch):
+        """`-ac` is applied after the graph, so volumedetect behind it measures the source."""
+        args, chain = self.args_for(monkeypatch, 1)
+        assert chain.index("aformat") < chain.index("volumedetect")
+        assert "-ac" not in args
+
+
+class TestLevelGain:
+    """Levelling mode is the difference between a scene clip that lands and one that mumbles."""
+
+    def test_peak_mode_puts_the_loudest_sample_at_the_target(self):
+        assert voice_script.level_gain(-12.7, -24.3, "peak", -1.0, -20.0) == pytest.approx(11.7)
+
+    def test_peak_mode_ignores_the_average(self):
+        quiet_voice = voice_script.level_gain(-12.7, -40.0, "peak", -1.0, -20.0)
+        assert quiet_voice == pytest.approx(11.7)
+
+    def test_rms_mode_aims_the_average_instead(self):
+        assert voice_script.level_gain(-12.7, -30.0, "rms", -1.0, -20.0) == pytest.approx(10.0)
+
+    def test_rms_mode_holds_back_a_clip_peak_mode_would_over_lift(self):
+        """How the modes differ, and the whole mechanism by which rms matches clips.
+
+        A tight, evenly-loud clip has room under the ceiling that peak mode spends in full,
+        landing it louder than a spikier clip given the same treatment. rms mode spends
+        only what the average asks for, so the two sit together.
+        """
+        peak, mean = -12.0, -22.0           # 10 dB crest: compressed, no big transient
+        assert (voice_script.level_gain(peak, mean, "rms", -1.0, -20.0)
+                < voice_script.level_gain(peak, mean, "peak", -1.0, -20.0))
+
+    def test_rms_mode_never_clips_the_effect(self):
+        """A very quiet average must not push the transient past the ceiling."""
+        gain = voice_script.level_gain(-3.0, -45.0, "rms", -1.0, -20.0)
+        assert gain == pytest.approx(2.0)
+        assert -3.0 + gain <= -1.0
+
+    def test_a_wide_crest_clamps_rms_back_to_peak(self):
+        """Honest about its own limit: past a 19 dB crest the ceiling decides, not the mode.
+
+        This is the case --limit exists for, and the case report_crest warns about.
+        """
+        peak, mean = -6.0, -34.0            # 28 dB crest: a loud hit over a quiet line
+        assert (voice_script.level_gain(peak, mean, "rms", -1.0, -20.0)
+                == voice_script.level_gain(peak, mean, "peak", -1.0, -20.0))
+
+    def test_limiting_lets_rms_reach_its_target(self):
+        """With a limiter holding the ceiling, the gain no longer has to."""
+        gain = voice_script.level_gain(-6.0, -34.0, "rms", -1.0, -20.0, limit=True)
+        assert gain == pytest.approx(14.0)
+        assert gain > voice_script.level_gain(-6.0, -34.0, "rms", -1.0, -20.0)
+
+    def test_limiting_does_not_change_peak_mode(self):
+        assert (voice_script.level_gain(-6.0, -34.0, "peak", -1.0, -20.0, limit=True)
+                == pytest.approx(5.0))
+
+    def test_none_mode_leaves_the_source_alone(self):
+        assert voice_script.level_gain(-12.7, -24.3, "none", -1.0, -20.0) == 0.0
+
+
+class TestLimiterFilter:
+    def test_ceiling_is_converted_to_the_linear_scale_alimiter_wants(self):
+        assert "limit=0.8913" in voice_script.limiter_filter(-1.0)
+        assert "limit=1.0000" in voice_script.limiter_filter(0.0)
+
+    def test_auto_level_is_off(self):
+        """alimiter re-normalises its output by default, undoing the gain just chosen."""
+        assert "level=0" in voice_script.limiter_filter(-1.0)
+
+
+class TestReportCrest:
+    """The warnings are the only thing standing between a bad choice and a quiet demo."""
+
+    def note(self, capsys, peak, mean, mode, limiting=False, peak_target=-1.0,
+             rms_target=-20.0):
+        voice_script.report_crest(peak, mean, mode, peak_target, rms_target, limiting)
+        return capsys.readouterr().err
+
+    def test_a_voice_only_clip_says_nothing(self, capsys):
+        assert self.note(capsys, -12.0, -25.0, "peak") == ""
+
+    def test_peak_mode_on_a_scene_clip_offers_rms(self, capsys):
+        assert "--level rms" in self.note(capsys, -6.0, -34.0, "peak")
+
+    def test_rms_mode_held_by_the_ceiling_offers_the_limiter(self, capsys):
+        assert "--limit" in self.note(capsys, -6.0, -34.0, "rms")
+
+    def test_rms_mode_that_reached_its_target_says_nothing(self, capsys):
+        """A 22 dB crest is wide, but a -30 dBFS target under a -1 dBFS ceiling clears it."""
+        assert self.note(capsys, -20.0, -42.0, "rms", rms_target=-30.0) == ""
+
+    def test_limiting_silences_the_advice(self, capsys):
+        """Nothing left to suggest once the limiter is already doing the work."""
+        assert self.note(capsys, -6.0, -34.0, "rms", limiting=True) == ""
 
 
 class TestExtractedClipIsPlayable:
@@ -354,6 +528,32 @@ class TestExtractedClipIsPlayable:
         assert voice_script.wav_duration(destination) == pytest.approx(0.2, abs=0.01)
         assert find_clip(destination.parent, "Chidori") == destination
 
+    def test_a_stereo_scene_clip_loads_through_the_player(self, tmp_path, monkeypatch):
+        """Keeping both channels must not cost the clip its playability."""
+        destination = tmp_path / "voice" / "chidori.wav"
+
+        def fake_run(ffmpeg, args):
+            write_wav(destination, seconds=3.0, rate=voice_script.SAMPLE_RATE, channels=2)
+            return ""
+
+        monkeypatch.setattr(voice_script, "run_ffmpeg", fake_run)
+        voice_script.extract("ffmpeg", Path("in.mp4"), destination, None, None, 6.0,
+                             fade=True, channels=2)
+
+        data, rate = read_wav(destination)
+        assert rate == voice_script.SAMPLE_RATE
+        assert data.shape[1] == 2
+        assert voice_script.wav_duration(destination) == pytest.approx(3.0, abs=0.01)
+
+        player = VoicePlayer(destination.parent, ["Chidori"], backend=FakeBackend())
+        assert player.play("Chidori")
+
+    def test_summary_distinguishes_a_scene_clip_from_a_voice_line(self, tmp_path):
+        voice_line = write_wav(tmp_path / "a.wav", seconds=0.9, channels=1)
+        scene = write_wav(tmp_path / "b.wav", seconds=3.0, channels=2)
+        assert voice_script.wav_summary(voice_line) == "  (0.90s, mono)"
+        assert voice_script.wav_summary(scene) == "  (3.00s, stereo)"
+
     def test_an_empty_result_is_reported(self, tmp_path, monkeypatch):
         """An out-of-range --start yields a 44-byte header and no samples."""
         destination = tmp_path / "chidori.wav"
@@ -371,17 +571,18 @@ class TestExtractedClipIsPlayable:
 class TestExtractFilters:
     """Filter graph assembly, checked without running ffmpeg."""
 
-    def capture(self, monkeypatch, tmp_path, start, end, gain, fade):
+    def capture(self, monkeypatch, tmp_path, start, end, gain, fade, channels=1,
+                limit_dbfs=None):
         seen = {}
 
         def fake_run(ffmpeg, args):
             seen["args"] = args
-            write_wav(tmp_path / "out.wav", seconds=0.1)
+            write_wav(tmp_path / "out.wav", seconds=0.1, channels=channels)
             return ""
 
         monkeypatch.setattr(voice_script, "run_ffmpeg", fake_run)
         voice_script.extract("ffmpeg", Path("in.mp4"), tmp_path / "out.wav",
-                             start, end, gain, fade)
+                             start, end, gain, fade, channels, limit_dbfs)
         args = seen["args"]
         return args, (args[args.index("-af") + 1] if "-af" in args else "")
 
@@ -390,6 +591,17 @@ class TestExtractFilters:
         assert args[args.index("-ac") + 1] == "1"
         assert args[args.index("-c:a") + 1] == "pcm_s16le"
         assert args[args.index("-ar") + 1] == str(voice_script.SAMPLE_RATE)
+
+    def test_stereo_keeps_both_channels(self, monkeypatch, tmp_path):
+        """Downmixing a wide-panned effect sums it out of phase and thins it."""
+        args, _ = self.capture(monkeypatch, tmp_path, None, None, 0.0, False, channels=2)
+        assert args[args.index("-ac") + 1] == "2"
+        assert args[args.index("-c:a") + 1] == "pcm_s16le"
+
+    def test_a_whole_file_cut_seeks_nowhere(self, monkeypatch, tmp_path):
+        """No --start/--end is the scene-clip case: every sample in the file is wanted."""
+        args, _ = self.capture(monkeypatch, tmp_path, None, None, 0.0, False)
+        assert "-ss" not in args and "-t" not in args
 
     def test_gain_is_applied(self, monkeypatch, tmp_path):
         _, filters = self.capture(monkeypatch, tmp_path, None, None, 6.5, False)
@@ -413,3 +625,20 @@ class TestExtractFilters:
         """A 60 ms fade on a 40 ms clip would fade in from and out to nothing."""
         _, filters = self.capture(monkeypatch, tmp_path, 1.0, 1.04, 0.0, True)
         assert "afade=t=out" not in filters
+
+    def test_no_limiter_unless_asked_for(self, monkeypatch, tmp_path):
+        _, filters = self.capture(monkeypatch, tmp_path, None, None, 6.0, False)
+        assert "alimiter" not in filters
+
+    def test_the_limiter_catches_what_the_gain_pushed_over(self, monkeypatch, tmp_path):
+        """Gain first, then the ceiling -- the other order limits, then blows past it."""
+        _, filters = self.capture(monkeypatch, tmp_path, None, None, 14.0, False,
+                                  limit_dbfs=-1.0)
+        assert filters.index("volume=") < filters.index("alimiter")
+
+    def test_fades_are_placed_after_the_limiter(self, monkeypatch, tmp_path):
+        """A limited fade is no longer a fade; it has to be the last thing applied."""
+        _, filters = self.capture(monkeypatch, tmp_path, 0.0, 3.0, 14.0, True,
+                                  limit_dbfs=-1.0)
+        assert filters.index("alimiter") < filters.index("afade=t=in")
+        assert filters.index("alimiter") < filters.index("afade=t=out")
