@@ -45,6 +45,7 @@ from handsign.bridge import (
     decode_control,
 )
 from handsign.transport import UdpDownlink, UdpUplink
+from handsign.videolink import DEFAULT_LOCAL_PORT, FrameEncoder
 
 
 class BridgeError(RuntimeError):
@@ -192,6 +193,12 @@ def main() -> int:
     parser.add_argument("--preview", action="store_true",
                         help="debug window showing what the model sees. Unity draws the "
                              "real game; this is only for checking the camera path")
+    parser.add_argument("--no-video", action="store_true",
+                        help="do not send the face cam to Unity")
+    parser.add_argument("--video-port", type=int, default=DEFAULT_LOCAL_PORT)
+    parser.add_argument("--video-width", type=int, default=640)
+    parser.add_argument("--video-quality", type=int, default=55, metavar="1-100")
+    parser.add_argument("--video-fps", type=float, default=20.0)
     parser.add_argument("--no-mirror", action="store_true",
                         help="do not flip the frame. Must match 04_demo.py, which mirrors "
                              "before inference")
@@ -324,6 +331,16 @@ def run_live(args, jutsu_list, encoder, gate, uplink, downlink) -> int:
     if args.preview:
         print("[bridge] preview window open (debug only) -- press q to close the window")
 
+    video = None
+    video_link = None
+    if not args.no_video:
+        video = FrameEncoder(
+            width=args.video_width, quality=args.video_quality, fps=args.video_fps
+        )
+        video_link = UdpUplink(args.unity_host, args.video_port)
+        print(f"[bridge] face cam -> {args.unity_host}:{args.video_port} "
+              f"({args.video_width}px q{args.video_quality} @{args.video_fps:g}fps)")
+
     committed: list[str] = []
     frames = 0
     fps = 0.0
@@ -352,6 +369,19 @@ def run_live(args, jutsu_list, encoder, gate, uplink, downlink) -> int:
                 import cv2
 
                 frame = cv2.flip(frame, 1)
+
+            # ── The face cam is sent BEFORE the lock check, deliberately. ──
+            # The lock exists to stop *recognition*, not to stop the camera. Skipping
+            # this while locked would freeze the player's own face for the six seconds
+            # their attack is in flight, which reads as a crash.
+            if video is not None and video.due(now):
+                packet = video.encode(frame, now)
+                if packet is not None:
+                    video_link.send(packet)
+                elif video.dropped_oversize == 1:
+                    video.dropped_oversize += 1        # warn once, then stay quiet
+                    print("[bridge] a video frame was too large to send; "
+                          "lower --video-quality or --video-width")
 
             # Skipping inference is the point of the lock, not just an optimisation:
             # it frees the GPU for the 6 seconds an attack is in flight.
@@ -420,6 +450,8 @@ def run_live(args, jutsu_list, encoder, gate, uplink, downlink) -> int:
         return 0
     finally:
         cap.release()
+        if video_link is not None:
+            video_link.close()
         if args.preview:
             import cv2
 
